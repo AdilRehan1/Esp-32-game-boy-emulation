@@ -11,32 +11,29 @@ extern "C" {
 #include "game_rom.h"
 
 // ---------------- DISPLAY ----------------
-
-#define TFT_CS 5
-#define TFT_DC 2
+#define TFT_CS  5
+#define TFT_DC  2
 #define TFT_RST 4
 
-Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 
 // ---------------- BUTTONS ----------------
-
-#define BTN_UP 32
-#define BTN_DOWN 33
-#define BTN_LEFT 34
-#define BTN_RIGHT 35
-#define BTN_A 25
-#define BTN_B 26
-#define BTN_START 27
+// FIX 1: Moved BTN_LEFT and BTN_RIGHT away from GPIO 34/35
+// GPIO 34,35,36,39 are input-only with no internal pull-up
+#define BTN_UP     32
+#define BTN_DOWN   33
+#define BTN_LEFT   12   // was 34 — input-only pin, no internal PU
+#define BTN_RIGHT  13   // was 35 — input-only pin, no internal PU
+#define BTN_A      25
+#define BTN_B      26
+#define BTN_START  27
 #define BTN_SELECT 14
 
 // ---------------- EMULATOR ----------------
-
 struct gb_s gb;
-
-uint16_t framebuffer[160 * 144];
+uint16_t framebuffer[LCD_WIDTH * LCD_HEIGHT];
 
 // ---------------- ROM ACCESS ----------------
-
 uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr)
 {
   return game_rom[addr];
@@ -49,102 +46,104 @@ uint8_t cart_ram_read(struct gb_s* gb, const uint_fast32_t addr)
 
 void cart_ram_write(struct gb_s* gb, const uint_fast32_t addr, const uint8_t val)
 {
+  // No save RAM support
 }
 
 // ---------------- ERROR HANDLER ----------------
-
-void error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr)
+void gb_error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr)
 {
-  Serial.print("GB ERROR ");
+  Serial.print("GB ERROR: ");
   Serial.println(err);
 }
 
 // ---------------- LCD DRAW ----------------
-
-void lcd_draw(struct gb_s* gb, const uint_fast32_t y, const uint8_t* pixels)
+void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
 {
-  for (int x = 0; x < 160; x++)
+  for (int x = 0; x < LCD_WIDTH; x++)
   {
-    uint8_t p = pixels[x];
-
+    uint8_t p = pixels[x] & 3;
     uint16_t color;
-
     switch (p)
     {
-      case 0: color = ILI9341_WHITE; break;
-      case 1: color = ILI9341_LIGHTGREY; break;
-      case 2: color = ILI9341_DARKGREY; break;
-      default: color = ILI9341_BLACK; break;
+      case 0: color = 0xFFFF; break; // White
+      case 1: color = 0xAD55; break; // Light grey
+      case 2: color = 0x52AA; break; // Dark grey
+      default: color = 0x0000; break; // Black
     }
-
-    framebuffer[y * 160 + x] = color;
+    framebuffer[line * LCD_WIDTH + x] = color;
   }
 
-  if (y == 143)
+  if (line == LCD_HEIGHT - 1)
   {
-    tft.drawRGBBitmap(40, 20, framebuffer, 160, 144);
+    // Centered on 320x240 landscape display
+    tft.drawRGBBitmap(80, 48, framebuffer, LCD_WIDTH, LCD_HEIGHT);
   }
 }
 
 // ---------------- INPUT ----------------
-
 uint8_t read_input()
 {
   uint8_t keys = 0;
-
-  if (!digitalRead(BTN_RIGHT)) keys |= GB_PAD_RIGHT;
-  if (!digitalRead(BTN_LEFT))  keys |= GB_PAD_LEFT;
-  if (!digitalRead(BTN_UP))    keys |= GB_PAD_UP;
-  if (!digitalRead(BTN_DOWN))  keys |= GB_PAD_DOWN;
-
-  if (!digitalRead(BTN_A)) keys |= GB_PAD_A;
-  if (!digitalRead(BTN_B)) keys |= GB_PAD_B;
-
-  if (!digitalRead(BTN_START))  keys |= GB_PAD_START;
-  if (!digitalRead(BTN_SELECT)) keys |= GB_PAD_SELECT;
-
+  if (!digitalRead(BTN_RIGHT))  keys |= JOYPAD_RIGHT;
+  if (!digitalRead(BTN_LEFT))   keys |= JOYPAD_LEFT;
+  if (!digitalRead(BTN_UP))     keys |= JOYPAD_UP;
+  if (!digitalRead(BTN_DOWN))   keys |= JOYPAD_DOWN;
+  if (!digitalRead(BTN_A))      keys |= JOYPAD_A;
+  if (!digitalRead(BTN_B))      keys |= JOYPAD_B;
+  if (!digitalRead(BTN_START))  keys |= JOYPAD_START;
+  if (!digitalRead(BTN_SELECT)) keys |= JOYPAD_SELECT;
   return keys;
 }
 
 // ---------------- SETUP ----------------
-
 void setup()
 {
   Serial.begin(115200);
 
-  pinMode(BTN_UP, INPUT_PULLUP);
-  pinMode(BTN_DOWN, INPUT_PULLUP);
-  pinMode(BTN_LEFT, INPUT_PULLUP);
-  pinMode(BTN_RIGHT, INPUT_PULLUP);
-
-  pinMode(BTN_A, INPUT_PULLUP);
-  pinMode(BTN_B, INPUT_PULLUP);
-  pinMode(BTN_START, INPUT_PULLUP);
+  pinMode(BTN_UP,     INPUT_PULLUP);
+  pinMode(BTN_DOWN,   INPUT_PULLUP);
+  // FIX 1: All button pins now support INPUT_PULLUP
+  pinMode(BTN_LEFT,   INPUT_PULLUP);
+  pinMode(BTN_RIGHT,  INPUT_PULLUP);
+  pinMode(BTN_A,      INPUT_PULLUP);
+  pinMode(BTN_B,      INPUT_PULLUP);
+  pinMode(BTN_START,  INPUT_PULLUP);
   pinMode(BTN_SELECT, INPUT_PULLUP);
+
+  SPI.begin();
+  SPI.setFrequency(40000000);
 
   tft.begin();
   tft.setRotation(1);
-  tft.fillScreen(ILI9341_BLACK);
+  tft.fillScreen(0x0000);
 
   Serial.println("Starting GameBoy");
 
-  gb_init(
+  // FIX 2: Added return value check so we can see exactly where it gets stuck
+  enum gb_init_error_e ret = gb_init(
     &gb,
     rom_read,
     cart_ram_read,
     cart_ram_write,
-    error,
+    gb_error,
     NULL
   );
 
-  gb_set_lcd_draw_callback(&gb, lcd_draw);
+  if (ret != GB_INIT_NO_ERROR)
+  {
+    Serial.print("gb_init failed with code: ");
+    Serial.println((int)ret);
+    while (1); // Halt and keep printing nothing — check Serial Monitor
+  }
+  Serial.println("gb_init OK");
+
+  gb_init_lcd(&gb, lcd_draw);
+  Serial.println("lcd init OK");
 }
 
 // ---------------- LOOP ----------------
-
 void loop()
 {
-  gb_set_joypad(&gb, read_input());
-
+  gb.direct.joypad = read_input();
   gb_run_frame(&gb);
 }
