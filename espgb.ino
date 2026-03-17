@@ -18,21 +18,19 @@ extern "C" {
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 
 // ---------------- BUTTONS ----------------
-// Better pin choices for ESP32
-#define BTN_UP     32   // ✅ OK
-#define BTN_DOWN   33   // ✅ OK  
-#define BTN_LEFT   34   // ✅ OK (input only)
-#define BTN_RIGHT  35   // ✅ OK (input only)
-#define BTN_A      25   // ✅ OK
-#define BTN_B      26   // ✅ OK
-#define BTN_START  27   // ✅ OK
-#define BTN_SELECT 22   // ✅ OK (input only)
+#define BTN_UP     32   
+#define BTN_DOWN   33   
+#define BTN_LEFT   34   
+#define BTN_RIGHT  35  
+#define BTN_A      25 
+#define BTN_B      26 
+#define BTN_START  27 
+#define BTN_SELECT 22 
 
 // ---------------- EMULATOR ----------------
 struct gb_s gb;
 uint16_t framebuffer[LCD_WIDTH * LCD_HEIGHT];
 
-// GB runs at ~59.7fps, so one frame = ~16ms
 #define FRAME_TIME_MS 16
 
 // ---------------- ROM ACCESS ----------------
@@ -60,7 +58,6 @@ void gb_error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr)
 // ---------------- LCD DRAW ----------------
 void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
 {
-  // FIX: Clear the line to black before drawing so no stale white pixels remain
   memset(&framebuffer[line * LCD_WIDTH], 0, LCD_WIDTH * sizeof(uint16_t));
 
   for (int x = 0; x < LCD_WIDTH; x++)
@@ -77,11 +74,11 @@ void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
     framebuffer[line * LCD_WIDTH + x] = color;
   }
 
-  // Only push to display once the full frame is complete
+
   if (line == LCD_HEIGHT - 1)
   {
     tft.drawRGBBitmap(80, 48, framebuffer, LCD_WIDTH, LCD_HEIGHT);
-    Serial.println("frame drawn"); // TEMP: Remove once confirmed working
+    Serial.println("frame drawn"); 
   }
 }
 
@@ -118,11 +115,10 @@ void setup()
   pinMode(BTN_START,  INPUT_PULLUP);
   pinMode(BTN_SELECT, INPUT_PULLUP);
 
-  // FIX: Let Adafruit manage SPI entirely — no manual SPI.begin() or setFrequency()
+ 
   tft.begin();
   tft.setRotation(1);
-  tft.fillScreen(0x0000); // Black — if screen stays white after this, TFT wiring is wrong
-
+  tft.fillScreen(0x0000);
   Serial.println("Starting GameBoy");
 
   enum gb_init_error_e ret = gb_init(
@@ -145,7 +141,6 @@ void setup()
   gb_init_lcd(&gb, lcd_draw);
   Serial.println("lcd init OK");
 
-  // Clear framebuffer to black so no stale white data
   memset(framebuffer, 0, sizeof(framebuffer));
 
   Serial.println("Entering loop...");
@@ -157,8 +152,6 @@ void loop()
   uint32_t frame_start = millis();
 
   uint8_t raw = read_input();
-
-  // DEBUG: Print when any button is pressed so you can verify each one
   if (raw != 0)
   {
     Serial.print("raw input: 0b");
