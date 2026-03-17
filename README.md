@@ -83,7 +83,7 @@ gbESP/
 # Converting a Game Boy ROM
 
 The emulator loads ROMs as **C arrays**.
-
+```
 file = input("Enter the path to the game ROM file: ")
 with open(file, "rb") as f:
     data = f.read()
@@ -98,7 +98,7 @@ with open("game_rom.h", "w") as out:
 
     out.write("\n};\n")
     out.write(f"const unsigned int game_rom_len = {len(data)};\n")
-
+```
 # Arduino IDE Setup
 
 Install:
