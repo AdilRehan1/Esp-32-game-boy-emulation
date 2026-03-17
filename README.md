@@ -137,11 +137,21 @@ PSRAM: Enabled
 
 The emulator reads ROM data through a callback:
 
-```cpp
-uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr)
-{
-  return game_rom[addr];
-}
+```python
+file = input("Enter the path to the game ROM file: ")
+with open(file, "rb") as f:
+    data = f.read()
+
+with open("game_rom.h", "w") as out:
+    out.write("const unsigned char game_rom[] = {\n")
+
+    for i, b in enumerate(data):
+        if i % 12 == 0:
+            out.write("\n ")
+        out.write(f"0x{b:02x}, ")
+
+    out.write("\n};\n")
+    out.write(f"const unsigned int game_rom_len = {len(data)};\n")
 ```
 
 ---
