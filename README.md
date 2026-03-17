@@ -84,33 +84,20 @@ gbESP/
 
 The emulator loads ROMs as **C arrays**.
 
-Use **xxd** to convert a ROM:
+file = input("Enter the path to the game ROM file: ")
+with open(file, "rb") as f:
+    data = f.read()
 
-```
-xxd -i tetris.gb > game_rom.h
-```
+with open("game_rom.h", "w") as out:
+    out.write("const unsigned char game_rom[] = {\n")
 
-If the ROM filename has spaces:
+    for i, b in enumerate(data):
+        if i % 12 == 0:
+            out.write("\n ")
+        out.write(f"0x{b:02x}, ")
 
-```
-xxd -i "Tetris (World).gb" > game_rom.h
-```
-
-This generates a header file containing the ROM as a byte array.
-
-Example output:
-
-```c
-unsigned char game_rom[] = {
-  0x31, 0xfe, 0xff, ...
-};
-
-unsigned int game_rom_len = 32768;
-```
-
-Place `game_rom.h` in the project folder.
-
----
+    out.write("\n};\n")
+    out.write(f"const unsigned int game_rom_len = {len(data)};\n")
 
 # Arduino IDE Setup
 
@@ -138,20 +125,8 @@ PSRAM: Enabled
 The emulator reads ROM data through a callback:
 
 ```python
-file = input("Enter the path to the game ROM file: ")
-with open(file, "rb") as f:
-    data = f.read()
-
-with open("game_rom.h", "w") as out:
-    out.write("const unsigned char game_rom[] = {\n")
-
-    for i, b in enumerate(data):
-        if i % 12 == 0:
-            out.write("\n ")
-        out.write(f"0x{b:02x}, ")
-
-    out.write("\n};\n")
-    out.write(f"const unsigned int game_rom_len = {len(data)};\n")
+uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr)
+{ return game_rom[addr]; }
 ```
 
 ---
