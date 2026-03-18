@@ -240,24 +240,24 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
       <!-- Row 1 -->
       <div></div>
       <button id="up" class="btn-dpad"
-        ontouchstart="press('/up',this)"   ontouchend="release(this)"
-        onmousedown="press('/up',this)"    onmouseup="release(this)">&#9650;</button>
+        ontouchstart="press('/up',this,event)"   ontouchend="release(this,event)"
+        onmousedown="press('/up',this,event)"    onmouseup="release(this,event)">&#9650;</button>
       <div></div>
 
       <!-- Row 2 -->
       <button id="left" class="btn-dpad"
-        ontouchstart="press('/left',this)"  ontouchend="release(this)"
-        onmousedown="press('/left',this)"   onmouseup="release(this)">&#9664;</button>
+        ontouchstart="press('/left',this,event)"  ontouchend="release(this,event)"
+        onmousedown="press('/left',this,event)"   onmouseup="release(this,event)">&#9664;</button>
       <div class="btn-dpad dpad-center"></div>
       <button id="right" class="btn-dpad"
-        ontouchstart="press('/right',this)" ontouchend="release(this)"
-        onmousedown="press('/right',this)"  onmouseup="release(this)">&#9654;</button>
+        ontouchstart="press('/right',this,event)" ontouchend="release(this,event)"
+        onmousedown="press('/right',this,event)"  onmouseup="release(this,event)">&#9654;</button>
 
       <!-- Row 3 -->
       <div></div>
       <button id="down" class="btn-dpad"
-        ontouchstart="press('/down',this)"  ontouchend="release(this)"
-        onmousedown="press('/down',this)"   onmouseup="release(this)">&#9660;</button>
+        ontouchstart="press('/down',this,event)"  ontouchend="release(this,event)"
+        onmousedown="press('/down',this,event)"   onmouseup="release(this,event)">&#9660;</button>
       <div></div>
 
     </div>
@@ -270,11 +270,11 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     </div>
     <div class="sys-row">
       <button id="select" class="btn-sys"
-        ontouchstart="press('/select',this)" ontouchend="release(this)"
-        onmousedown="press('/select',this)"  onmouseup="release(this)">SELECT</button>
+        ontouchstart="press('/select',this,event)" ontouchend="release(this,event)"
+        onmousedown="press('/select',this,event)"  onmouseup="release(this,event)">SELECT</button>
       <button id="start" class="btn-sys"
-        ontouchstart="press('/start',this)"  ontouchend="release(this)"
-        onmousedown="press('/start',this)"   onmouseup="release(this)">START</button>
+        ontouchstart="press('/start',this,event)"  ontouchend="release(this,event)"
+        onmousedown="press('/start',this,event)"   onmouseup="release(this,event)">START</button>
     </div>
   </div>
 
@@ -287,11 +287,11 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     -->
     <div class="ab-grid">
       <button id="a" class="btn-ab btn-a"
-        ontouchstart="press('/a',this)"  ontouchend="release(this)"
-        onmousedown="press('/a',this)"   onmouseup="release(this)">A</button>
+        ontouchstart="press('/a',this,event)"  ontouchend="release(this,event)"
+        onmousedown="press('/a',this,event)"   onmouseup="release(this,event)">A</button>
       <button id="b" class="btn-ab btn-b"
-        ontouchstart="press('/b',this)"  ontouchend="release(this)"
-        onmousedown="press('/b',this)"   onmouseup="release(this)">B</button>
+        ontouchstart="press('/b',this,event)"  ontouchend="release(this,event)"
+        onmousedown="press('/b',this,event)"   onmouseup="release(this,event)">B</button>
     </div>
     <div class="ab-labels">
       <div class="ab-label">B</div>
@@ -308,23 +308,24 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
   // ---- Input handling ----
   let held = null;
 
-  function press(cmd, el) {
-    if (held && held !== el) release(held);
-    held = el;
-    el.classList.add('held');
-    fetch(cmd).catch(() => {});
-    document.getElementById('status').textContent =
-      cmd.replace('/', '').toUpperCase();
-  }
+function press(cmd, el, e) {
+  if (e) e.preventDefault();   // ← stops browser firing fake mousedown after touch
+  if (held && held !== el) release(held);
+  held = el;
+  el.classList.add('held');
+  fetch(cmd).catch(() => {});
+  document.getElementById('status').textContent =
+    cmd.replace('/', '').toUpperCase();
+}
 
-  function release(el) {
-    if (!el) return;
-    el.classList.remove('held');
-    held = null;
-    fetch('/release').catch(() => {});
-    document.getElementById('status').textContent = 'Ready';
-  }
-
+function release(el, e) {
+  if (e) e.preventDefault();   // ← stops browser firing fake mouseup after touchend
+  if (!el) return;
+  el.classList.remove('held');
+  held = null;
+  fetch('/release').catch(() => {});
+  document.getElementById('status').textContent = 'Ready';
+}
   // Prevent context menu on long-press
   document.addEventListener('contextmenu', e => e.preventDefault());
 
