@@ -10,8 +10,14 @@ extern "C" {
 #include "peanut_gb.h"
 }
 
-#include "game_rom.h"
-#include "webpage.h"       // HTML lives here — loaded from PROGMEM
+#include "rom_list.h"
+#include "webpage.h"
+
+//////////////////// PINS ////////////////////
+
+#define TFT_CS  5
+#define TFT_DC  2
+#define TFT_RST 4
 
 //////////////////// WIFI ////////////////////
 
@@ -19,28 +25,33 @@ const char* ssid     = "ESP32-GameBoy";
 const char* password = "12345678";
 
 WebServer server(80);
-volatile uint8_t wifi_keys = 0;   // set by web handlers, read in loop
+volatile uint8_t wifi_keys      = 0;
+volatile uint8_t wifi_keys_prev = 0;
 
 //////////////////// DISPLAY ////////////////////
-
-#define TFT_CS  5
-#define TFT_DC  2
-#define TFT_RST 4
 
 Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
 
 //////////////////// EMULATOR ////////////////////
 
-struct gb_s gb;
-uint16_t framebuffer[LCD_WIDTH * LCD_HEIGHT];
+struct gb_s  gb;
+uint16_t     scaledRow[320];
+int          activeRomIdx = 0;
 
-#define FRAME_TIME_MS 16
+//////////////////// APP STATE ////////////////////
+
+enum AppState { STATE_MENU, STATE_GAME };
+AppState appState = STATE_MENU;
+int menuSelected  = 0;
 
 //////////////////// ROM ACCESS ////////////////////
 
+// Reads from PROGMEM — no RAM used for ROM data
 uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr)
 {
-  return game_rom[addr];
+  if (addr < ROM_LIST[activeRomIdx].size)
+    return pgm_read_byte(&ROM_LIST[activeRomIdx].data[addr]);
+  return 0xFF;
 }
 
 uint8_t cart_ram_read(struct gb_s* gb, const uint_fast32_t addr)
@@ -52,7 +63,7 @@ void cart_ram_write(struct gb_s* gb, const uint_fast32_t addr, const uint8_t val
 {
 }
 
-//////////////////// ERROR ////////////////////
+//////////////////// GB ERROR ////////////////////
 
 void gb_error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr)
 {
@@ -60,7 +71,7 @@ void gb_error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr)
   Serial.println(err);
 }
 
-//////////////////// LCD DRAW ////////////////////
+//////////////////// LCD DRAW — fullscreen stretch ////////////////////
 
 void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
 {
@@ -75,86 +86,144 @@ void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
       case 2: color = 0x52AA; break;
       default: color = 0x0000; break;
     }
-    framebuffer[line * LCD_WIDTH + x] = color;
+    scaledRow[x * 2]     = color;
+    scaledRow[x * 2 + 1] = color;
   }
 
-  if (line == LCD_HEIGHT - 1)
-  {
-    tft.drawRGBBitmap(80, 48, framebuffer, LCD_WIDTH, LCD_HEIGHT);
-  }
+  int y0 = ((int)line * 240) / 144;
+  int y1 = ((int)(line + 1) * 240) / 144;
+  for (int sy = y0; sy < y1; sy++)
+    tft.drawRGBBitmap(0, sy, scaledRow, 320, 1);
 }
 
-//////////////////// WEB HANDLERS ////////////////////
+//////////////////// HELPERS ////////////////////
 
-void handleRoot()
+void formatSize(uint32_t size, char* out)
 {
-  // Serve the HTML from PROGMEM — zero RAM cost for the page string
-  server.send_P(200, "text/html", WEBPAGE);
+  if (size >= 1024 * 1024)
+    snprintf(out, 12, "%.1fMB", size / (1024.0f * 1024.0f));
+  else
+    snprintf(out, 12, "%uKB", (unsigned)(size / 1024));
 }
 
-void pressUp()     { wifi_keys |= JOYPAD_UP;     server.send(200, "text/plain", "OK"); }
-void pressDown()   { wifi_keys |= JOYPAD_DOWN;   server.send(200, "text/plain", "OK"); }
-void pressLeft()   { wifi_keys |= JOYPAD_LEFT;   server.send(200, "text/plain", "OK"); }
-void pressRight()  { wifi_keys |= JOYPAD_RIGHT;  server.send(200, "text/plain", "OK"); }
-void pressA()      { wifi_keys |= JOYPAD_A;      server.send(200, "text/plain", "OK"); }
-void pressB()      { wifi_keys |= JOYPAD_B;      server.send(200, "text/plain", "OK"); }
-void pressStart()  { wifi_keys |= JOYPAD_START;  server.send(200, "text/plain", "OK"); }
-void pressSelect() { wifi_keys |= JOYPAD_SELECT; server.send(200, "text/plain", "OK"); }
-void releaseKeys() { wifi_keys = 0;              server.send(200, "text/plain", "OK"); }
+//////////////////// MENU ////////////////////
 
-//////////////////// SETUP ////////////////////
+#define MENU_ITEM_H  36
+#define MENU_VISIBLE  5
 
-void setup()
+void drawMenu()
 {
-  Serial.begin(115200);
-
-  // Display
-  tft.begin();
-  tft.setRotation(1);
   tft.fillScreen(0x0000);
 
-  // Splash
+  // Title bar
+  tft.fillRect(0, 0, 320, 40, 0x0319);
   tft.setTextColor(0x07FF);
   tft.setTextSize(2);
-  tft.setCursor(60, 100);
-  tft.print("ESP32 GameBoy");
+  tft.setCursor(70, 12);
+  tft.print("SELECT GAME");
+
+  // ROM count
   tft.setTextSize(1);
   tft.setTextColor(0x8410);
-  tft.setCursor(85, 126);
-  tft.print("Starting WiFi...");
+  tft.setCursor(252, 4);
+  tft.print(ROM_COUNT);
+  tft.print(" ROMs");
 
-  // WiFi AP
-  WiFi.softAP(ssid, password);
-  Serial.print("AP IP: ");
-  Serial.println(WiFi.softAPIP());
+  // Scanline background
+  for (int y = 40; y < 228; y += 4)
+    tft.drawFastHLine(0, y, 320, 0x0821);
 
-  // Show IP on screen
-  tft.fillRect(0, 140, 320, 14, 0x0000);
-  tft.setTextColor(0xFFFF);
-  tft.setCursor(70, 141);
-  tft.print("Connect to: ");
-  tft.print(ssid);
-  tft.setCursor(85, 155);
-  tft.print("IP: ");
-  tft.print(WiFi.softAPIP());
+  // Scroll window
+  int scrollStart = max(0, min(menuSelected - 2,
+                               ROM_COUNT - MENU_VISIBLE));
 
-  // Web server routes
-  server.on("/",        handleRoot);
-  server.on("/up",      pressUp);
-  server.on("/down",    pressDown);
-  server.on("/left",    pressLeft);
-  server.on("/right",   pressRight);
-  server.on("/a",       pressA);
-  server.on("/b",       pressB);
-  server.on("/start",   pressStart);
-  server.on("/select",  pressSelect);
-  server.on("/release", releaseKeys);
-  server.begin();
+  for (int i = 0; i < MENU_VISIBLE; i++)
+  {
+    int idx = scrollStart + i;
+    if (idx >= ROM_COUNT) break;
 
-  // Emulator
-  tft.setCursor(85, 170);
+    int  y     = 46 + i * MENU_ITEM_H;
+    bool isSel = (idx == menuSelected);
+
+    if (isSel)
+    {
+      tft.fillRoundRect(6, y, 306, MENU_ITEM_H - 4, 6, 0x07FF);
+      tft.setTextColor(0x0000);
+    }
+    else
+    {
+      tft.drawRoundRect(6, y, 306, MENU_ITEM_H - 4, 6, 0x2945);
+      tft.setTextColor(0xFFFF);
+    }
+
+    // Arrow + name
+    tft.setTextSize(2);
+    tft.setCursor(16, y + 8);
+    tft.print(isSel ? "> " : "  ");
+
+    // Truncate long names
+    char truncated[18];
+    strncpy(truncated, ROM_LIST[idx].name, 17);
+    truncated[17] = '\0';
+    tft.print(truncated);
+
+    // Size on right
+    char sizeBuf[12];
+    formatSize(ROM_LIST[idx].size, sizeBuf);
+    tft.setTextSize(1);
+    tft.setTextColor(isSel ? 0x0000 : 0x8410);
+    tft.setCursor(268, y + 12);
+    tft.print(sizeBuf);
+  }
+
+  // Scrollbar
+  if (ROM_COUNT > MENU_VISIBLE)
+  {
+    int trackH = MENU_VISIBLE * MENU_ITEM_H;
+    int barH   = max(8, (MENU_VISIBLE * trackH) / ROM_COUNT);
+    int barY   = 46 + (scrollStart * (trackH - barH)) /
+                       max(1, ROM_COUNT - MENU_VISIBLE);
+    tft.fillRect(314, 46, 4, trackH, 0x2945);
+    tft.fillRect(314, barY, 4, barH, 0x07FF);
+  }
+
+  // Footer
+  tft.fillRect(0, 228, 320, 12, 0x0319);
   tft.setTextColor(0x8410);
-  tft.print("Loading ROM...");
+  tft.setTextSize(1);
+  tft.setCursor(55, 231);
+  tft.print("[UP/DOWN] Navigate    [A] Launch");
+}
+
+//////////////////// LAUNCH ROM ////////////////////
+
+void launchRom(int idx)
+{
+  activeRomIdx = idx;
+
+  // Loading screen
+  tft.fillScreen(0x0000);
+  tft.fillRect(0, 0, 320, 40, 0x0319);
+  tft.setTextColor(0x07FF);
+  tft.setTextSize(2);
+  tft.setCursor(90, 12);
+  tft.print("LOADING");
+
+  tft.setTextColor(0xFFFF);
+  tft.setTextSize(2);
+  tft.setCursor(20, 80);
+  tft.print(ROM_LIST[idx].name);
+
+  char sizeBuf[12];
+  formatSize(ROM_LIST[idx].size, sizeBuf);
+  tft.setTextColor(0x8410);
+  tft.setTextSize(1);
+  tft.setCursor(20, 108);
+  tft.print(sizeBuf);
+  tft.print(" in PROGMEM");
+
+  tft.setCursor(20, 130);
+  tft.print("Initializing emulator...");
 
   enum gb_init_error_e ret = gb_init(
     &gb,
@@ -167,33 +236,152 @@ void setup()
 
   if (ret != GB_INIT_NO_ERROR)
   {
+    tft.setTextColor(0xF800);
+    tft.setCursor(20, 155);
+    tft.print("gb_init FAILED: ");
+    tft.print((int)ret);
     Serial.print("gb_init failed: ");
     Serial.println((int)ret);
-    tft.setTextColor(0xF800);
-    tft.setCursor(85, 185);
-    tft.print("ROM FAILED: ");
-    tft.print((int)ret);
-    while (1);
+    delay(2000);
+    drawMenu();
+    appState = STATE_MENU;
+    return;
   }
 
   gb_init_lcd(&gb, lcd_draw);
-  memset(framebuffer, 0, sizeof(framebuffer));
 
-  Serial.println("Ready — open browser to " + WiFi.softAPIP().toString());
+  tft.setTextColor(0x07E0);
+  tft.setCursor(20, 155);
+  tft.print("OK — starting!");
+  delay(500);
+
+  wifi_keys      = 0;
+  wifi_keys_prev = 0;
+  appState       = STATE_GAME;
+}
+
+//////////////////// WEB HANDLERS ////////////////////
+
+void handleRoot()    { server.send_P(200, "text/html", WEBPAGE); }
+
+void pressUp()     { wifi_keys |= JOYPAD_UP;     server.send(200,"text/plain","OK"); }
+void pressDown()   { wifi_keys |= JOYPAD_DOWN;   server.send(200,"text/plain","OK"); }
+void pressLeft()   { wifi_keys |= JOYPAD_LEFT;   server.send(200,"text/plain","OK"); }
+void pressRight()  { wifi_keys |= JOYPAD_RIGHT;  server.send(200,"text/plain","OK"); }
+void pressA()      { wifi_keys |= JOYPAD_A;      server.send(200,"text/plain","OK"); }
+void pressB()      { wifi_keys |= JOYPAD_B;      server.send(200,"text/plain","OK"); }
+void pressStart()  { wifi_keys |= JOYPAD_START;  server.send(200,"text/plain","OK"); }
+void pressSelect() { wifi_keys |= JOYPAD_SELECT; server.send(200,"text/plain","OK"); }
+void releaseKeys() { wifi_keys = 0;              server.send(200,"text/plain","OK"); }
+
+//////////////////// SETUP ////////////////////
+
+void setup()
+{
+  Serial.begin(115200);
+
+  tft.begin();
+  tft.setRotation(1);
+  tft.fillScreen(0x0000);
+
+  // Splash
+  tft.setTextColor(0x07FF);
+  tft.setTextSize(2);
+  tft.setCursor(55, 80);
+  tft.print("ESP32 GameBoy");
+
+  tft.setTextSize(1);
+  tft.setTextColor(0x8410);
+  tft.setCursor(30, 115);
+  tft.print(ROM_COUNT);
+  tft.print(ROM_COUNT == 1 ? " ROM loaded" : " ROMs loaded");
+
+  tft.setCursor(30, 133);
+  tft.print("Starting WiFi...");
+
+  WiFi.softAP(ssid, password);
+
+  tft.setTextColor(0x07E0);
+  tft.setCursor(30, 151);
+  tft.print("SSID: ");
+  tft.print(ssid);
+  tft.setCursor(30, 169);
+  tft.print("IP:   ");
+  tft.print(WiFi.softAPIP());
+
+  server.on("/",        handleRoot);
+  server.on("/up",      pressUp);
+  server.on("/down",    pressDown);
+  server.on("/left",    pressLeft);
+  server.on("/right",   pressRight);
+  server.on("/a",       pressA);
+  server.on("/b",       pressB);
+  server.on("/start",   pressStart);
+  server.on("/select",  pressSelect);
+  server.on("/release", releaseKeys);
+  server.begin();
+
+  Serial.println("Ready");
+  delay(1200);
+  drawMenu();
 }
 
 //////////////////// LOOP ////////////////////
+
+#define FRAME_TIME_MS 16
 
 void loop()
 {
   server.handleClient();
 
+  uint8_t pressed = wifi_keys & ~wifi_keys_prev;
+  wifi_keys_prev  = wifi_keys;
+
+  // ── MENU ─────────────────────────────────────
+  if (appState == STATE_MENU)
+  {
+    bool redraw = false;
+    if (pressed & JOYPAD_UP)
+    {
+      menuSelected = (menuSelected - 1 + ROM_COUNT) % ROM_COUNT;
+      redraw = true;
+    }
+    if (pressed & JOYPAD_DOWN)
+    {
+      menuSelected = (menuSelected + 1) % ROM_COUNT;
+      redraw = true;
+    }
+    if (redraw) drawMenu();
+    if (pressed & JOYPAD_A) launchRom(menuSelected);
+
+    delay(16);
+    return;
+  }
+
+  // ── GAME ─────────────────────────────────────
   uint32_t frame_start = millis();
 
-  // WiFi-only input — physical buttons removed
-  // peanut_gb expects joypad bits INVERTED (0 = pressed)
-  gb.direct.joypad = ~wifi_keys;
+  // Hold SELECT + START for 2 seconds to return to menu
+  static uint32_t exit_hold_start = 0;
+  if ((wifi_keys & JOYPAD_SELECT) && (wifi_keys & JOYPAD_START))
+  {
+    if (exit_hold_start == 0) exit_hold_start = millis();
+    if (millis() - exit_hold_start > 2000)
+    {
+      exit_hold_start = 0;
+      wifi_keys       = 0;
+      wifi_keys_prev  = 0;
+      appState        = STATE_MENU;
+      drawMenu();
+      return;
+    }
+  }
+  else
+  {
+    exit_hold_start = 0;
+  }
 
+  gb.direct.joypad = ~wifi_keys;
   gb_run_frame(&gb);
 
   uint32_t elapsed = millis() - frame_start;
