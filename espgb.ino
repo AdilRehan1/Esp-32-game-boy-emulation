@@ -11,14 +11,15 @@ extern "C" {
 }
 
 #include "game_rom.h"
+#include "webpage.h"       // HTML lives here — loaded from PROGMEM
 
 //////////////////// WIFI ////////////////////
 
-const char* ssid = "ESP32-GameBoy";
+const char* ssid     = "ESP32-GameBoy";
 const char* password = "12345678";
 
 WebServer server(80);
-uint8_t wifi_keys = 0;
+volatile uint8_t wifi_keys = 0;   // set by web handlers, read in loop
 
 //////////////////// DISPLAY ////////////////////
 
@@ -26,7 +27,7 @@ uint8_t wifi_keys = 0;
 #define TFT_DC  2
 #define TFT_RST 4
 
-Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
 
 //////////////////// EMULATOR ////////////////////
 
@@ -67,7 +68,6 @@ void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
   {
     uint8_t p = pixels[x] & 3;
     uint16_t color;
-
     switch (p)
     {
       case 0: color = 0xFFFF; break;
@@ -75,7 +75,6 @@ void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
       case 2: color = 0x52AA; break;
       default: color = 0x0000; break;
     }
-
     framebuffer[line * LCD_WIDTH + x] = color;
   }
 
@@ -85,176 +84,121 @@ void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
   }
 }
 
-//////////////////// WIFI BUTTON HANDLERS ////////////////////
-
-void pressUp()    { wifi_keys |= JOYPAD_UP; server.send(200,"text/plain","OK"); }
-void pressDown()  { wifi_keys |= JOYPAD_DOWN; server.send(200,"text/plain","OK"); }
-void pressLeft()  { wifi_keys |= JOYPAD_LEFT; server.send(200,"text/plain","OK"); }
-void pressRight() { wifi_keys |= JOYPAD_RIGHT; server.send(200,"text/plain","OK"); }
-
-void pressA()     { wifi_keys |= JOYPAD_A; server.send(200,"text/plain","OK"); }
-void pressB()     { wifi_keys |= JOYPAD_B; server.send(200,"text/plain","OK"); }
-
-void pressStart() { wifi_keys |= JOYPAD_START; server.send(200,"text/plain","OK"); }
-void pressSelect(){ wifi_keys |= JOYPAD_SELECT; server.send(200,"text/plain","OK"); }
-
-void releaseKeys(){ wifi_keys = 0; server.send(200,"text/plain","OK"); }
-
-//////////////////// WEB PAGE ////////////////////
+//////////////////// WEB HANDLERS ////////////////////
 
 void handleRoot()
 {
-
-String page = R"rawliteral(
-
-<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-
-body{
-text-align:center;
-font-family:sans-serif;
+  // Serve the HTML from PROGMEM — zero RAM cost for the page string
+  server.send_P(200, "text/html", WEBPAGE);
 }
 
-button{
-width:80px;
-height:80px;
-font-size:20px;
-margin:5px;
-}
-
-</style>
-</head>
-<body>
-
-<h2>ESP32 GameBoy Controller</h2>
-
-<div>
-<button ontouchstart="press('/up')" ontouchend="release()">UP</button><br>
-<button ontouchstart="press('/left')" ontouchend="release()">LEFT</button>
-<button ontouchstart="press('/right')" ontouchend="release()">RIGHT</button><br>
-<button ontouchstart="press('/down')" ontouchend="release()">DOWN</button>
-</div>
-
-<br>
-
-<div>
-<button ontouchstart="press('/a')" ontouchend="release()">A</button>
-<button ontouchstart="press('/b')" ontouchend="release()">B</button>
-</div>
-
-<br>
-
-<div>
-<button ontouchstart="press('/start')" ontouchend="release()">START</button>
-<button ontouchstart="press('/select')" ontouchend="release()">SELECT</button>
-</div>
-
-<script>
-
-function press(cmd)
-{
-  fetch(cmd);
-}
-
-function release()
-{
-  fetch('/release');
-}
-
-</script>
-
-</body>
-</html>
-
-)rawliteral";
-
-server.send(200,"text/html",page);
-
-}
+void pressUp()     { wifi_keys |= JOYPAD_UP;     server.send(200, "text/plain", "OK"); }
+void pressDown()   { wifi_keys |= JOYPAD_DOWN;   server.send(200, "text/plain", "OK"); }
+void pressLeft()   { wifi_keys |= JOYPAD_LEFT;   server.send(200, "text/plain", "OK"); }
+void pressRight()  { wifi_keys |= JOYPAD_RIGHT;  server.send(200, "text/plain", "OK"); }
+void pressA()      { wifi_keys |= JOYPAD_A;      server.send(200, "text/plain", "OK"); }
+void pressB()      { wifi_keys |= JOYPAD_B;      server.send(200, "text/plain", "OK"); }
+void pressStart()  { wifi_keys |= JOYPAD_START;  server.send(200, "text/plain", "OK"); }
+void pressSelect() { wifi_keys |= JOYPAD_SELECT; server.send(200, "text/plain", "OK"); }
+void releaseKeys() { wifi_keys = 0;              server.send(200, "text/plain", "OK"); }
 
 //////////////////// SETUP ////////////////////
 
 void setup()
 {
+  Serial.begin(115200);
 
-Serial.begin(115200);
+  // Display
+  tft.begin();
+  tft.setRotation(1);
+  tft.fillScreen(0x0000);
 
-tft.begin();
-tft.setRotation(1);
-tft.fillScreen(0x0000);
+  // Splash
+  tft.setTextColor(0x07FF);
+  tft.setTextSize(2);
+  tft.setCursor(60, 100);
+  tft.print("ESP32 GameBoy");
+  tft.setTextSize(1);
+  tft.setTextColor(0x8410);
+  tft.setCursor(85, 126);
+  tft.print("Starting WiFi...");
 
-//////////////// WIFI //////////////////
+  // WiFi AP
+  WiFi.softAP(ssid, password);
+  Serial.print("AP IP: ");
+  Serial.println(WiFi.softAPIP());
 
-WiFi.softAP(ssid,password);
+  // Show IP on screen
+  tft.fillRect(0, 140, 320, 14, 0x0000);
+  tft.setTextColor(0xFFFF);
+  tft.setCursor(70, 141);
+  tft.print("Connect to: ");
+  tft.print(ssid);
+  tft.setCursor(85, 155);
+  tft.print("IP: ");
+  tft.print(WiFi.softAPIP());
 
-Serial.println("WiFi started");
-Serial.println(WiFi.softAPIP());
+  // Web server routes
+  server.on("/",        handleRoot);
+  server.on("/up",      pressUp);
+  server.on("/down",    pressDown);
+  server.on("/left",    pressLeft);
+  server.on("/right",   pressRight);
+  server.on("/a",       pressA);
+  server.on("/b",       pressB);
+  server.on("/start",   pressStart);
+  server.on("/select",  pressSelect);
+  server.on("/release", releaseKeys);
+  server.begin();
 
-//////////////// SERVER //////////////////
+  // Emulator
+  tft.setCursor(85, 170);
+  tft.setTextColor(0x8410);
+  tft.print("Loading ROM...");
 
-server.on("/",handleRoot);
+  enum gb_init_error_e ret = gb_init(
+    &gb,
+    rom_read,
+    cart_ram_read,
+    cart_ram_write,
+    gb_error,
+    NULL
+  );
 
-server.on("/up",pressUp);
-server.on("/down",pressDown);
-server.on("/left",pressLeft);
-server.on("/right",pressRight);
+  if (ret != GB_INIT_NO_ERROR)
+  {
+    Serial.print("gb_init failed: ");
+    Serial.println((int)ret);
+    tft.setTextColor(0xF800);
+    tft.setCursor(85, 185);
+    tft.print("ROM FAILED: ");
+    tft.print((int)ret);
+    while (1);
+  }
 
-server.on("/a",pressA);
-server.on("/b",pressB);
+  gb_init_lcd(&gb, lcd_draw);
+  memset(framebuffer, 0, sizeof(framebuffer));
 
-server.on("/start",pressStart);
-server.on("/select",pressSelect);
-
-server.on("/release",releaseKeys);
-
-server.begin();
-
-//////////////// EMULATOR //////////////////
-
-enum gb_init_error_e ret = gb_init(
-&gb,
-rom_read,
-cart_ram_read,
-cart_ram_write,
-gb_error,
-NULL
-);
-
-if(ret!=GB_INIT_NO_ERROR)
-{
-Serial.println("gb_init failed");
-while(1);
-}
-
-gb_init_lcd(&gb,lcd_draw);
-
-memset(framebuffer,0,sizeof(framebuffer));
-
+  Serial.println("Ready — open browser to " + WiFi.softAPIP().toString());
 }
 
 //////////////////// LOOP ////////////////////
 
 void loop()
 {
+  server.handleClient();
 
-server.handleClient();
+  uint32_t frame_start = millis();
 
-uint32_t frame_start = millis();
+  // WiFi-only input — physical buttons removed
+  // peanut_gb expects joypad bits INVERTED (0 = pressed)
+  gb.direct.joypad = ~wifi_keys;
 
-// ONLY WIFI INPUT NOW
-uint8_t combined = wifi_keys;
-gb.direct.joypad = ~combined;
+  gb_run_frame(&gb);
 
-gb_run_frame(&gb);
-
-uint32_t elapsed = millis() - frame_start;
-
-if(elapsed < FRAME_TIME_MS)
-delay(FRAME_TIME_MS - elapsed);
-else
-delay(1);
-
+  uint32_t elapsed = millis() - frame_start;
+  if (elapsed < FRAME_TIME_MS)
+    delay(FRAME_TIME_MS - elapsed);
+  else
+    delay(1);
 }
