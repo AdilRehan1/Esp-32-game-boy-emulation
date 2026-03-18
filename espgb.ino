@@ -28,17 +28,6 @@ uint8_t wifi_keys = 0;
 
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 
-//////////////////// BUTTONS ////////////////////
-
-#define BTN_UP     32
-#define BTN_DOWN   33
-#define BTN_LEFT   15
-#define BTN_RIGHT  16
-#define BTN_A      25
-#define BTN_B      26
-#define BTN_START  27
-#define BTN_SELECT 22
-
 //////////////////// EMULATOR ////////////////////
 
 struct gb_s gb;
@@ -94,26 +83,6 @@ void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
   {
     tft.drawRGBBitmap(80, 48, framebuffer, LCD_WIDTH, LCD_HEIGHT);
   }
-}
-
-//////////////////// PHYSICAL INPUT ////////////////////
-
-uint8_t read_input()
-{
-  uint8_t keys = 0;
-
-  if (!digitalRead(BTN_RIGHT))  keys |= JOYPAD_RIGHT;
-  if (!digitalRead(BTN_LEFT))   keys |= JOYPAD_LEFT;
-  if (!digitalRead(BTN_UP))     keys |= JOYPAD_UP;
-  if (!digitalRead(BTN_DOWN))   keys |= JOYPAD_DOWN;
-
-  if (!digitalRead(BTN_A))      keys |= JOYPAD_A;
-  if (!digitalRead(BTN_B))      keys |= JOYPAD_B;
-
-  if (!digitalRead(BTN_SELECT)) keys |= JOYPAD_SELECT;
-  if (!digitalRead(BTN_START))  keys |= JOYPAD_START;
-
-  return keys;
 }
 
 //////////////////// WIFI BUTTON HANDLERS ////////////////////
@@ -213,16 +182,6 @@ void setup()
 
 Serial.begin(115200);
 
-pinMode(BTN_UP,INPUT_PULLUP);
-pinMode(BTN_DOWN,INPUT_PULLUP);
-pinMode(BTN_LEFT,INPUT_PULLUP);
-pinMode(BTN_RIGHT,INPUT_PULLUP);
-
-pinMode(BTN_A,INPUT_PULLUP);
-pinMode(BTN_B,INPUT_PULLUP);
-pinMode(BTN_START,INPUT_PULLUP);
-pinMode(BTN_SELECT,INPUT_PULLUP);
-
 tft.begin();
 tft.setRotation(1);
 tft.fillScreen(0x0000);
@@ -285,11 +244,8 @@ server.handleClient();
 
 uint32_t frame_start = millis();
 
-uint8_t raw = read_input();
-
-// 🔥 FIXED INPUT HANDLING
-uint8_t combined = raw | wifi_keys;
-combined &= 0xFF;
+// ONLY WIFI INPUT NOW
+uint8_t combined = wifi_keys;
 gb.direct.joypad = ~combined;
 
 gb_run_frame(&gb);
