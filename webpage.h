@@ -6,368 +6,364 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>ESP32 GameBoy</title>
 <style>
 
-* {
-  box-sizing: border-box;
-  -webkit-tap-highlight-color: transparent;
-  user-select: none;
-  touch-action: manipulation;
-}
+  * {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    touch-action: none;
+  }
 
-body {
-  margin: 0;
-  padding: 0;
-  background: #1a1a2e;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 100vh;
-  font-family: sans-serif;
-  overflow: hidden;
-}
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #1a1a2e;
+  }
 
-/* ── Shell ── */
-.shell {
-  width: 360px;
-  background: linear-gradient(180deg, #7b68ee 0%, #6a5acd 40%, #483d8b 100%);
-  border-radius: 20px 20px 60px 60px;
-  padding: 12px 16px 40px 16px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.2);
-  position: relative;
-}
+  /* ---- SHELL ---- */
+  .shell {
+    width: 100vw;
+    height: 100vh;
+    background: linear-gradient(160deg, #2a2a4a 0%, #1a1a2e 100%);
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    position: relative;
+  }
 
-/* ── Screen area ── */
-.screen-bezel {
-  background: #111;
-  border-radius: 10px;
-  padding: 10px;
-  margin-bottom: 14px;
-  box-shadow: inset 0 2px 8px rgba(0,0,0,0.8);
-}
+  /* ---- SCREEN WINDOW (centre) ---- */
+  .screen-area {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
 
-.screen-label {
-  color: #aaa;
-  font-size: 9px;
-  letter-spacing: 3px;
-  text-align: center;
-  text-transform: uppercase;
-  margin-bottom: 6px;
-}
+  .screen-bezel {
+    background: #111;
+    border-radius: 8px;
+    padding: 8px;
+    border: 2px solid #333;
+    box-shadow: 0 0 20px rgba(0,255,255,0.15);
+  }
 
-.screen {
-  background: #0d1f0d;
-  height: 70px;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #3a7d44;
-  font-size: 11px;
-  letter-spacing: 1px;
-}
+  .screen-label {
+    font-family: sans-serif;
+    font-size: 11px;
+    color: #444;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
 
-/* ── Shoulder buttons ── */
-.shoulders {
-  display: flex;
-  justify-content: space-between;
-  margin: 0 -4px 8px -4px;
-}
+  /* START / SELECT row */
+  .sys-row {
+    display: flex;
+    gap: 16px;
+    margin-top: 6px;
+  }
 
-.btn-shoulder {
-  width: 80px;
-  height: 28px;
-  font-size: 13px;
-  font-weight: bold;
-  background: linear-gradient(180deg, #5a4fcf, #3d35a0);
-  color: #ddd;
-  border: none;
-  cursor: pointer;
-  box-shadow: 0 3px 0 #1a1060;
-  letter-spacing: 1px;
-}
+  .btn-sys {
+    width: 64px;
+    height: 22px;
+    border-radius: 11px;
+    background: #2d2d50;
+    border: 1px solid #444;
+    color: #aaa;
+    font-size: 10px;
+    font-family: sans-serif;
+    font-weight: bold;
+    letter-spacing: 1px;
+    cursor: pointer;
+    box-shadow: 0 3px 0 #111;
+    transition: background 0.08s, transform 0.08s, box-shadow 0.08s;
+  }
 
-.btn-shoulder.left  { border-radius: 8px 4px 4px 14px; }
-.btn-shoulder.right { border-radius: 4px 8px 14px 4px; }
+  .btn-sys.held,
+  .btn-sys:active {
+    background: #0ff;
+    color: #000;
+    transform: translateY(2px);
+    box-shadow: 0 1px 0 #111;
+  }
 
-.btn-shoulder:active, .btn-shoulder.held {
-  background: linear-gradient(180deg, #0ff, #0cc);
-  color: #000;
-  transform: translateY(3px);
-  box-shadow: 0 0 0 #1a1060;
-}
+  /* ---- LEFT SIDE — D-PAD ---- */
+  .left-side {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+  }
 
-/* ── Main controls row ── */
-.controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 4px;
-}
+  .dpad {
+    display: grid;
+    grid-template-columns: 52px 52px 52px;
+    grid-template-rows:    52px 52px 52px;
+    gap: 3px;
+  }
 
-/* ── D-Pad ── */
-.dpad-wrap {
-  width: 120px;
-  height: 120px;
-  position: relative;
-}
+  .btn-dpad {
+    width: 52px;
+    height: 52px;
+    background: #2a2a4a;
+    border: none;
+    border-radius: 6px;
+    color: #ccc;
+    font-size: 20px;
+    cursor: pointer;
+    box-shadow: 0 4px 0 #0a0a1a;
+    transition: background 0.08s, transform 0.08s, box-shadow 0.08s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
 
-.dpad-h, .dpad-v {
-  position: absolute;
-  background: #222;
-  border-radius: 4px;
-  box-shadow: 0 3px 0 #000, inset 0 1px 0 rgba(255,255,255,0.05);
-}
+  .btn-dpad.held,
+  .btn-dpad:active {
+    background: #0ff;
+    color: #000;
+    transform: translateY(3px);
+    box-shadow: 0 1px 0 #0a0a1a;
+  }
 
-/* Horizontal bar */
-.dpad-h {
-  width: 100%;
-  height: 34%;
-  top: 33%;
-  left: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
+  .dpad-center {
+    background: #1e1e38 !important;
+    pointer-events: none;
+    box-shadow: none !important;
+  }
 
-/* Vertical bar */
-.dpad-v {
-  width: 34%;
-  height: 100%;
-  top: 0;
-  left: 33%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: space-between;
-}
+  /* ---- RIGHT SIDE — A / B ---- */
+  .right-side {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
 
-.dpad-btn {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 1;
-  width: 100%;
-  color: #555;
-  font-size: 16px;
-  padding: 2px;
-}
+  /*
+    GBA layout (landscape view):
+    
+         [ A ]
+    [ B ]
+    
+    Grid: 2 cols x 2 rows, A top-right, B bottom-left
+  */
+  .ab-grid {
+    display: grid;
+    grid-template-columns: 64px 64px;
+    grid-template-rows:    64px 64px;
+    gap: 6px;
+  }
 
-.dpad-btn:active, .dpad-btn.held {
-  color: #0ff;
-  background: rgba(0,255,255,0.08);
-}
+  .btn-ab {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    border: none;
+    font-size: 18px;
+    font-weight: bold;
+    font-family: sans-serif;
+    cursor: pointer;
+    box-shadow: 0 5px 0 #000;
+    transition: background 0.08s, transform 0.08s, box-shadow 0.08s;
+    color: #fff;
+  }
 
-/* ── Center buttons (SELECT / START) ── */
-.center-btns {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-}
+  .btn-ab.held,
+  .btn-ab:active {
+    transform: translateY(4px);
+    box-shadow: 0 1px 0 #000;
+    filter: brightness(1.3);
+  }
 
-.btn-sys {
-  width: 52px;
-  height: 18px;
-  font-size: 9px;
-  font-weight: bold;
-  letter-spacing: 1px;
-  background: linear-gradient(180deg, #3d3d5c, #2a2a40);
-  color: #888;
-  border: none;
-  border-radius: 9px;
-  cursor: pointer;
-  box-shadow: 0 2px 0 #111, inset 0 1px 0 rgba(255,255,255,0.07);
-  text-transform: uppercase;
-}
+  .btn-a {
+    background: radial-gradient(circle at 35% 35%, #e83030, #900);
+    grid-column: 2;
+    grid-row: 1;
+  }
 
-.btn-sys:active, .btn-sys.held {
-  background: linear-gradient(180deg, #0ff, #0cc);
-  color: #000;
-  transform: translateY(2px);
-  box-shadow: 0 0 0 #111;
-}
+  .btn-b {
+    background: radial-gradient(circle at 35% 35%, #e8a030, #960);
+    grid-column: 1;
+    grid-row: 2;
+  }
 
-/* ── A / B buttons ── */
-.ab-wrap {
-  width: 120px;
-  height: 120px;
-  position: relative;
-}
+  /* labels under A/B grid */
+  .ab-labels {
+    display: grid;
+    grid-template-columns: 64px 64px;
+    gap: 6px;
+    margin-top: 4px;
+  }
 
-/* GBA diagonal layout: B bottom-left, A center-right */
-.btn-ab {
-  position: absolute;
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-  border: none;
-  cursor: pointer;
-  font-size: 16px;
-  font-weight: bold;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 4px 0 rgba(0,0,0,0.5);
-  color: #fff;
-}
+  .ab-label {
+    text-align: center;
+    font-size: 11px;
+    color: #555;
+    font-family: sans-serif;
+  }
 
-.btn-b {
-  background: radial-gradient(circle at 35% 35%, #e05050, #a00);
-  bottom: 14px;
-  left: 10px;
-  box-shadow: 0 4px 0 #500;
-}
-
-.btn-a {
-  background: radial-gradient(circle at 35% 35%, #50c050, #060);
-  top: 14px;
-  right: 10px;
-  box-shadow: 0 4px 0 #030;
-}
-
-.btn-ab:active, .btn-ab.held {
-  transform: translateY(4px);
-  box-shadow: 0 0 0;
-  filter: brightness(1.4);
-}
-
-/* ── Status bar ── */
-#status {
-  text-align: center;
-  color: #555;
-  font-size: 10px;
-  letter-spacing: 1px;
-  margin-top: 14px;
-  text-transform: uppercase;
-}
+  /* status pill */
+  #status {
+    position: fixed;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.5);
+    color: #555;
+    font-size: 11px;
+    font-family: sans-serif;
+    padding: 3px 12px;
+    border-radius: 10px;
+    pointer-events: none;
+  }
 
 </style>
 </head>
 <body>
-
 <div class="shell">
 
-  <!-- Screen -->
-  <div class="screen-bezel">
-    <div class="screen-label">Game Boy</div>
-    <div class="screen">&#9654; GAME RUNNING</div>
-  </div>
+  <!-- ========== LEFT: D-PAD ========== -->
+  <div class="left-side">
+    <div class="dpad">
 
-  <!-- Shoulder buttons -->
-  <div class="shoulders">
-    <button class="btn-shoulder left"
-      ontouchstart="press('/left_shoulder',this)" ontouchend="release(this)"
-      onmousedown="press('/left_shoulder',this)"  onmouseup="release(this)">L</button>
-    <button class="btn-shoulder right"
-      ontouchstart="press('/right_shoulder',this)" ontouchend="release(this)"
-      onmousedown="press('/right_shoulder',this)"  onmouseup="release(this)">R</button>
-  </div>
+      <!-- Row 1 -->
+      <div></div>
+      <button id="up" class="btn-dpad"
+        ontouchstart="press('/up',this)"   ontouchend="release(this)"
+        onmousedown="press('/up',this)"    onmouseup="release(this)">&#9650;</button>
+      <div></div>
 
-  <!-- D-pad + Center + A/B -->
-  <div class="controls">
+      <!-- Row 2 -->
+      <button id="left" class="btn-dpad"
+        ontouchstart="press('/left',this)"  ontouchend="release(this)"
+        onmousedown="press('/left',this)"   onmouseup="release(this)">&#9664;</button>
+      <div class="btn-dpad dpad-center"></div>
+      <button id="right" class="btn-dpad"
+        ontouchstart="press('/right',this)" ontouchend="release(this)"
+        onmousedown="press('/right',this)"  onmouseup="release(this)">&#9654;</button>
 
-    <!-- D-Pad -->
-    <div class="dpad-wrap">
-
-      <!-- Horizontal bar: LEFT | RIGHT -->
-      <div class="dpad-h">
-        <button class="dpad-btn"
-          ontouchstart="press('/left',this)"  ontouchend="release(this)"
-          onmousedown="press('/left',this)"   onmouseup="release(this)">&#9664;</button>
-        <button class="dpad-btn"
-          ontouchstart="press('/right',this)" ontouchend="release(this)"
-          onmousedown="press('/right',this)"  onmouseup="release(this)">&#9654;</button>
-      </div>
-
-      <!-- Vertical bar: UP | DOWN -->
-      <div class="dpad-v">
-        <button class="dpad-btn"
-          ontouchstart="press('/up',this)"   ontouchend="release(this)"
-          onmousedown="press('/up',this)"    onmouseup="release(this)">&#9650;</button>
-        <button class="dpad-btn"
-          ontouchstart="press('/down',this)" ontouchend="release(this)"
-          onmousedown="press('/down',this)"  onmouseup="release(this)">&#9660;</button>
-      </div>
+      <!-- Row 3 -->
+      <div></div>
+      <button id="down" class="btn-dpad"
+        ontouchstart="press('/down',this)"  ontouchend="release(this)"
+        onmousedown="press('/down',this)"   onmouseup="release(this)">&#9660;</button>
+      <div></div>
 
     </div>
+  </div>
 
-    <!-- SELECT / START -->
-    <div class="center-btns">
-      <button class="btn-sys"
+  <!-- ========== CENTRE: SCREEN + START/SELECT ========== -->
+  <div class="screen-area">
+    <div class="screen-bezel">
+      <div class="screen-label">&#9632;&nbsp;&nbsp;Nintendo&nbsp;&nbsp;&#9632;</div>
+    </div>
+    <div class="sys-row">
+      <button id="select" class="btn-sys"
         ontouchstart="press('/select',this)" ontouchend="release(this)"
         onmousedown="press('/select',this)"  onmouseup="release(this)">SELECT</button>
-      <button class="btn-sys"
+      <button id="start" class="btn-sys"
         ontouchstart="press('/start',this)"  ontouchend="release(this)"
         onmousedown="press('/start',this)"   onmouseup="release(this)">START</button>
     </div>
-
-    <!-- A / B diagonal -->
-    <div class="ab-wrap">
-      <button class="btn-ab btn-b"
-        ontouchstart="press('/b',this)" ontouchend="release(this)"
-        onmousedown="press('/b',this)"  onmouseup="release(this)">B</button>
-      <button class="btn-ab btn-a"
-        ontouchstart="press('/a',this)" ontouchend="release(this)"
-        onmousedown="press('/a',this)"  onmouseup="release(this)">A</button>
-    </div>
-
   </div>
 
-  <div id="status">Ready</div>
+  <!-- ========== RIGHT: A / B ========== -->
+  <div class="right-side">
+    <!--
+      GBA button layout:
+           [ A ]
+      [ B ]
+    -->
+    <div class="ab-grid">
+      <button id="a" class="btn-ab btn-a"
+        ontouchstart="press('/a',this)"  ontouchend="release(this)"
+        onmousedown="press('/a',this)"   onmouseup="release(this)">A</button>
+      <button id="b" class="btn-ab btn-b"
+        ontouchstart="press('/b',this)"  ontouchend="release(this)"
+        onmousedown="press('/b',this)"   onmouseup="release(this)">B</button>
+    </div>
+    <div class="ab-labels">
+      <div class="ab-label">B</div>
+      <div class="ab-label">A</div>
+    </div>
+  </div>
 
-</div>
+</div><!-- /shell -->
+
+<div id="status">Ready</div>
 
 <script>
 
-  let currentBtn = null;
+  // ---- Input handling ----
+  let held = null;
 
   function press(cmd, el) {
-    if (currentBtn && currentBtn !== el) release(currentBtn);
-    currentBtn = el;
-    if (el) el.classList.add('held');
+    if (held && held !== el) release(held);
+    held = el;
+    el.classList.add('held');
     fetch(cmd).catch(() => {});
-    document.getElementById('status').textContent = cmd.replace('/','').toUpperCase();
+    document.getElementById('status').textContent =
+      cmd.replace('/', '').toUpperCase();
   }
 
   function release(el) {
-    if (el) el.classList.remove('held');
-    currentBtn = null;
+    if (!el) return;
+    el.classList.remove('held');
+    held = null;
     fetch('/release').catch(() => {});
-    document.getElementById('status').textContent = 'READY';
+    document.getElementById('status').textContent = 'Ready';
   }
 
-  // Keyboard support
+  // Prevent context menu on long-press
+  document.addEventListener('contextmenu', e => e.preventDefault());
+
+  // ---- Keyboard (desktop testing) ----
   const keyMap = {
-    ArrowUp:    '/up',
-    ArrowDown:  '/down',
-    ArrowLeft:  '/left',
-    ArrowRight: '/right',
-    z: '/a', Z: '/a',
-    x: '/b', X: '/b',
-    Enter:  '/start',
-    Shift:  '/select'
+    ArrowUp:    ['/up',    'up'],
+    ArrowDown:  ['/down',  'down'],
+    ArrowLeft:  ['/left',  'left'],
+    ArrowRight: ['/right', 'right'],
+    z:          ['/a',     'a'],
+    Z:          ['/a',     'a'],
+    x:          ['/b',     'b'],
+    X:          ['/b',     'b'],
+    Enter:      ['/start', 'start'],
+    Shift:      ['/select','select'],
   };
 
-  const held = new Set();
+  const heldKeys = new Set();
 
   document.addEventListener('keydown', e => {
-    if (held.has(e.key) || !keyMap[e.key]) return;
-    held.add(e.key);
-    fetch(keyMap[e.key]).catch(() => {});
-    document.getElementById('status').textContent = e.key.toUpperCase();
+    if (heldKeys.has(e.key) || !keyMap[e.key]) return;
+    e.preventDefault();
+    heldKeys.add(e.key);
+    const [cmd, id] = keyMap[e.key];
+    const el = document.getElementById(id);
+    if (el) el.classList.add('held');
+    fetch(cmd).catch(() => {});
+    document.getElementById('status').textContent = cmd.replace('/','').toUpperCase();
   });
 
   document.addEventListener('keyup', e => {
     if (!keyMap[e.key]) return;
-    held.delete(e.key);
-    if (held.size === 0) {
+    heldKeys.delete(e.key);
+    const [, id] = keyMap[e.key];
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('held');
+    if (heldKeys.size === 0) {
       fetch('/release').catch(() => {});
-      document.getElementById('status').textContent = 'READY';
+      document.getElementById('status').textContent = 'Ready';
     }
   });
 
