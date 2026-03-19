@@ -76,14 +76,21 @@ Install:
 
 Convert your `.gb` file into a header file:
 
-```bash
-xxd -i game.gb > game_rom.h
 ```
+file = input("Enter the path to the game ROM file: ")
+with open(file, "rb") as f:
+    data = f.read()
 
-Then rename the array inside to:
+with open("game_rom.h", "w") as out:
+    out.write("const unsigned char game_rom[] = {\n")
 
-```c
-const unsigned char game_rom[] = { ... };
+    for i, b in enumerate(data):
+        if i % 12 == 0:
+            out.write("\n ")
+        out.write(f"0x{b:02x}, ")
+
+    out.write("\n};\n")
+    out.write(f"const unsigned int game_rom_len = {len(data)};\n")
 ```
 
 ---
