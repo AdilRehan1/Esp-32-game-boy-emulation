@@ -1,37 +1,39 @@
-# ESP32 Game Boy Emulator (ILI9341 + Peanut-GB)
+#  ESP32 GameBoy Emulator (WiFi Controlled)
 
-A simple **Game Boy emulator handheld prototype** built using an **ESP32-WROVER**, a **ILI9341 TFT display**, and the **Peanut-GB emulator core**.
-The project runs a Game Boy ROM directly from flash memory and renders it to the TFT display while reading input from physical buttons.
-
-This project is intended as a **learning and experimentation platform** for embedded systems, emulator design, and DIY handheld consoles.
+A **GameBoy emulator running on ESP32** with a TFT display, powered by the lightweight **Peanut-GB emulator**, and controlled wirelessly using your phone over WiFi.
 
 ---
 
-# Features
+##  Features
 
-* Runs original **Nintendo Game Boy ROMs**
-* Uses the lightweight **Peanut-GB emulator**
-* Displays graphics on a **ILI9341 320×240 TFT**
-* Button input mapped to Game Boy controls
-* ROM compiled directly into firmware
-* ~60 FPS frame pacing
-
----
-
-# Hardware Used
-
-| Component        | Description                     |
-| ---------------- | ------------------------------- |
-| ESP32-WROVER     | Main microcontroller with PSRAM |
-| ILI9341 TFT      | 320×240 SPI display             |
-| Push Buttons     | Game controls                   |
-| Breadboard / PCB | Prototyping                     |
+*  GameBoy emulation on ESP32
+*  **Wireless control via phone (WiFi web interface)**
+*  ILI9341 TFT display support
+*  ~60 FPS emulation loop
+*  4-color GameBoy palette rendering
+*  No physical buttons required
 
 ---
 
-# Pinout
+##  How It Works
 
-## TFT Display (ILI9341)
+* The ESP32 runs a GameBoy emulator using `peanut_gb.h`
+* A ROM is stored as a `.h` file (`game_rom.h`)
+* The ESP32 creates its own WiFi hotspot
+* Your phone connects to it and opens a web controller
+* Button presses from the webpage are sent to the ESP32 in real-time
+
+---
+
+##  Hardware Required
+
+* ESP32
+* ILI9341 TFT Display (SPI)
+* Jumper wires
+
+---
+
+##  Wiring (ILI9341 → ESP32)
 
 | TFT Pin | ESP32 Pin |
 | ------- | --------- |
@@ -41,181 +43,126 @@ This project is intended as a **learning and experimentation platform** for embe
 | DC      | GPIO 2    |
 | RST     | GPIO 4    |
 | MOSI    | GPIO 23   |
-| MISO    | GPIO 19   |
 | SCK     | GPIO 18   |
+| LED     | 3.3V      |
 
 ---
 
-## Buttons
-
-Buttons use **INPUT_PULLUP**, so each button connects:
+##  Project Structure
 
 ```
-GPIO ---- Button ---- GND
-```
-
-| Button | ESP32 Pin |
-| ------ | --------- |
-| UP     | GPIO 32   |
-| DOWN   | GPIO 33   |
-| LEFT   | GPIO 15   |
-| RIGHT  | GPIO 13   |
-| A      | GPIO 25   |
-| B      | GPIO 26   |
-| START  | GPIO 27   |
-| SELECT | GPIO 14   |
-
----
-
-# Project Structure
-
-```
-gbESP/
-│
-├── gbESP.ino        # Main firmware
-├── peanut_gb.h      # Game Boy emulator core
-├── game_rom.h       # Converted ROM file
-└── README.md
+ESP32-GameBoy/
+│── gbESP.ino        # Main emulator code
+│── peanut_gb.h      # Emulator core
+│── game_rom.h       # Converted ROM file
+│── README.md
 ```
 
 ---
 
-# Converting a Game Boy ROM
+##  Setup Instructions
 
-The emulator loads ROMs as **C arrays**.
-```
-file = input("Enter the path to the game ROM file: ")
-with open(file, "rb") as f:
-    data = f.read()
-
-with open("game_rom.h", "w") as out:
-    out.write("const unsigned char game_rom[] = {\n")
-
-    for i, b in enumerate(data):
-        if i % 12 == 0:
-            out.write("\n ")
-        out.write(f"0x{b:02x}, ")
-
-    out.write("\n};\n")
-    out.write(f"const unsigned int game_rom_len = {len(data)};\n")
-```
-# Arduino IDE Setup
+### 1. Install Arduino Libraries
 
 Install:
 
-* ESP32 board support
-* Adafruit GFX library
-* Adafruit ILI9341 library
+* `Adafruit GFX`
+* `Adafruit ILI9341`
+* `WiFi` (comes with ESP32 core)
 
-Board settings:
+---
 
+### 2. Convert Game ROM
+
+Convert your `.gb` file into a header file:
+
+```bash
+xxd -i game.gb > game_rom.h
 ```
-Board: ESP32 Dev Module
-Flash Size: 4MB
-Partition Scheme: Huge APP (3MB No OTA)
-PSRAM: Enabled
+
+Then rename the array inside to:
+
+```c
+const unsigned char game_rom[] = { ... };
 ```
 
 ---
 
-# How It Works
+### 3. Upload Code
 
-1. **ROM Access**
+* Open `gbESP.ino` in Arduino IDE
+* Select **ESP32 board**
+* Upload the code
 
-The emulator reads ROM data through a callback:
+---
 
-```python
-uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr)
-{ return game_rom[addr]; }
+### 4. Connect to ESP32
+
+* Connect your phone to:
+
+```
+SSID: ESP32-GameBoy
+Password: 12345678
+```
+
+* Open browser and go to:
+
+```
+http://192.168.4.1
 ```
 
 ---
 
-2. **Rendering**
+##  Controls
 
-Each Game Boy scanline is converted into RGB565 pixels and stored in a framebuffer.
-Once the frame finishes rendering, it is drawn to the TFT display.
-
-Game Boy resolution:
-
-```
-160 × 144
-```
-
-TFT resolution:
-
-```
-320 × 240
-```
-
-The frame is centered on the screen.
+| Button  | Function  |
+| ------- | --------- |
+| ↑ ↓ ← → | Movement  |
+| A       | Action    |
+| B       | Secondary |
+| START   | Start     |
+| SELECT  | Select    |
 
 ---
 
-3. **Input Handling**
+## Web Controller
 
-Button presses are converted into Game Boy joypad bits:
-
-```
-RIGHT
-LEFT
-UP
-DOWN
-A
-B
-START
-SELECT
-```
-
-These values are sent to the emulator each frame.
+* Runs directly from ESP32
+* No app needed
+* Works on any phone or browser
 
 ---
 
-4. **Frame Timing**
+##  Limitations
 
-Game Boy refresh rate:
-
-```
-~59.7 FPS
-```
-
-The loop maintains this rate using a **16 ms frame delay**.
-
----
-
-# Current Limitations
-
+* Only original GameBoy games (no GBC yet)
+* Limited by ESP32 performance
 * Audio not implemented
-* Only one ROM compiled at a time
-* No save states
-* No SD card ROM loader
-* No Game Boy Color support yet
+* Uses 4-shade grayscale palette
 
 ---
 
-# Possible Improvements
+##  Future Improvements
 
-Future upgrades could include:
-
-* I2S audio output
-* SD card ROM browser
-* Game Boy Color support
-* Battery powered handheld build
-* Full screen scaling
-* Save states
-* Menu system
+*  Add sound support
+*  GameBoy Color (GBC) support
+*  Bluetooth controller support
+*  Save game support
+*  Performance optimization
 
 ---
 
-# Credits
+##  Credits
 
-Game Boy emulator core:
+* Peanut GB Emulator
+* Adafruit GFX Library
+* ESP32 Arduino Core
 
-**Peanut-GB**
+---
 
-Display libraries:
+##  License
+This project is open-source. Use it for learning and personal projects.
 
-* Adafruit GFX
-* Adafruit ILI9341
+---
 
 ---
