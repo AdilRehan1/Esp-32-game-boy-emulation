@@ -6,6 +6,11 @@
 #include <Adafruit_ILI9341.h>
 #include "driver/i2s.h"
 
+// ADD these three lines right before the peanut_gb include block
+// Forward-declare so peanut_gb.h can see them at include time
+extern "C" uint8_t audio_read(uint16_t addr);
+extern "C" void    audio_write(uint16_t addr, uint8_t val);
+
 extern "C" {
 #define PEANUT_GB_IMPLEMENTATION
 #define ENABLE_SOUND 1
