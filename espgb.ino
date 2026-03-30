@@ -4,20 +4,16 @@
 #include <WebServer.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
+#include "driver/i2s.h"
 
 extern "C" {
 #define PEANUT_GB_IMPLEMENTATION
+#define ENABLE_SOUND 1
 #include "peanut_gb.h"
 }
 
-#include "rom_list.h"
+#include "rom_tetris.h"
 #include "webpage.h"
-
-//////////////////// PINS ////////////////////
-
-#define TFT_CS  5
-#define TFT_DC  2
-#define TFT_RST 4
 
 //////////////////// WIFI ////////////////////
 
@@ -25,254 +21,441 @@ const char* ssid     = "ESP32-GameBoy";
 const char* password = "12345678";
 
 WebServer server(80);
-volatile uint8_t wifi_keys      = 0;
-volatile uint8_t wifi_keys_prev = 0;
+volatile uint8_t wifi_keys = 0;
 
 //////////////////// DISPLAY ////////////////////
 
+#define TFT_CS  5
+#define TFT_DC  2
+#define TFT_RST 4
 Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
+
+//////////////////// I2S / MAX98357A ////////////////////
+
+#define I2S_BCLK   26
+#define I2S_LRC    25
+#define I2S_DOUT   22
+#define I2S_PORT   I2S_NUM_0
+#define SAMPLE_RATE 22050
+
+#define AUDIO_BUF_SAMPLES 1024
+static int16_t  audioBuf[AUDIO_BUF_SAMPLES * 2];
+static volatile int audioBufHead = 0;
+static volatile int audioBufTail = 0;
+
+//////////////////// GB APU ////////////////////
+// peanut_gb calls audio_read / audio_write from the CPU R/W path.
+// We store all registers and synthesise audio from them each sample.
+
+static uint8_t apuReg[0x30]; // indexed by addr - 0xFF10
+
+// ---- Duty table: steps HIGH out of 8 ----
+static const uint8_t DUTY[4] = { 1, 2, 4, 6 }; // 12.5 / 25 / 50 / 75 %
+
+// ---- Per-channel state ----
+struct SquareCh {
+  bool    on;
+  uint8_t dutyIdx;
+  int     vol, envVol0;
+  bool    envAdd;
+  int     envPer, envTimer;
+  int     freqReg;
+  uint32_t phase, phaseInc; // 8-step fixed-point (<<13)
+  int     lenTimer;
+  bool    lenOn;
+};
+
+struct WaveCh {
+  bool    on, dacOn;
+  int     outLevel;         // 0=mute 1=100% 2=50% 3=25%
+  int     freqReg;
+  uint32_t phase, phaseInc; // 32-sample fixed-point (<<8)
+  int     lenTimer;
+  bool    lenOn;
+};
+
+struct NoiseCh {
+  bool    on;
+  int     vol, envVol0;
+  bool    envAdd;
+  int     envPer, envTimer;
+  int     clkShift, divCode;
+  bool    shortMode;
+  uint16_t lfsr;
+  uint32_t clkAcc, clkPer;
+  int     lenTimer;
+  bool    lenOn;
+};
+
+static SquareCh aCh1, aCh2;
+static WaveCh   aCh3;
+static NoiseCh  aCh4;
+static bool     apuOn = true;
+
+// ---- Frame sequencer (512 Hz → length/envelope clocking) ----
+static int fsCounter = 0;
+static int fsStep    = 0;
+#define FS_PERIOD (SAMPLE_RATE / 512)   // ~43 samples
+
+// ---- Phase increment helpers ----
+static uint32_t sqInc(int f)
+{
+  // GB square freq = 131072 / (2048-f) Hz, 8 steps/period, fixed <<13
+  if (f >= 2048) return 0;
+  return (uint32_t)(131072.0f / (2048 - f) * 8.0f / SAMPLE_RATE * 8192.0f);
+}
+static uint32_t wvInc(int f)
+{
+  // GB wave freq = 65536 / (2048-f) Hz, 32 samples/period, fixed <<8
+  if (f >= 2048) return 0;
+  return (uint32_t)(65536.0f / (2048 - f) * 32.0f / SAMPLE_RATE * 256.0f);
+}
+static uint32_t noiseClkPer(int shift, int div)
+{
+  // Clock period in samples (fixed <<8)
+  float d = div == 0 ? 0.5f : (float)div;
+  float hz = 524288.0f / d / (float)(1 << (shift + 1));
+  if (hz < 1.0f) return 0xFFFFFF;
+  return (uint32_t)(SAMPLE_RATE / hz * 256.0f);
+}
+
+// ---- Trigger functions ----
+static void trigCh1()
+{
+  aCh1.on      = true;
+  aCh1.vol     = aCh1.envVol0;
+  aCh1.envTimer = aCh1.envPer;
+  if (!aCh1.lenTimer) aCh1.lenTimer = 64;
+  aCh1.phaseInc = sqInc(aCh1.freqReg);
+}
+static void trigCh2()
+{
+  aCh2.on      = true;
+  aCh2.vol     = aCh2.envVol0;
+  aCh2.envTimer = aCh2.envPer;
+  if (!aCh2.lenTimer) aCh2.lenTimer = 64;
+  aCh2.phaseInc = sqInc(aCh2.freqReg);
+}
+static void trigCh3()
+{
+  aCh3.on    = true;
+  aCh3.phase = 0;
+  if (!aCh3.lenTimer) aCh3.lenTimer = 256;
+  aCh3.phaseInc = wvInc(aCh3.freqReg);
+}
+static void trigCh4()
+{
+  aCh4.on       = true;
+  aCh4.vol      = aCh4.envVol0;
+  aCh4.envTimer  = aCh4.envPer;
+  aCh4.lfsr     = 0x7FFF;
+  if (!aCh4.lenTimer) aCh4.lenTimer = 64;
+  aCh4.clkPer   = noiseClkPer(aCh4.clkShift, aCh4.divCode);
+  aCh4.clkAcc   = 0;
+}
+
+// ---- Frame sequencer tick ----
+static void tickFS()
+{
+  fsStep = (fsStep + 1) & 7;
+
+  // Length counter at steps 0,2,4,6 (256 Hz)
+  if (!(fsStep & 1))
+  {
+    if (aCh1.lenOn && aCh1.lenTimer > 0 && --aCh1.lenTimer == 0) aCh1.on = false;
+    if (aCh2.lenOn && aCh2.lenTimer > 0 && --aCh2.lenTimer == 0) aCh2.on = false;
+    if (aCh3.lenOn && aCh3.lenTimer > 0 && --aCh3.lenTimer == 0) aCh3.on = false;
+    if (aCh4.lenOn && aCh4.lenTimer > 0 && --aCh4.lenTimer == 0) aCh4.on = false;
+  }
+
+  // Envelope at step 7 (64 Hz)
+  if (fsStep == 7)
+  {
+    auto tickEnv = [](int& vol, int envVol0, bool envAdd, int envPer, int& envTimer, bool on)
+    {
+      if (!on || envPer == 0) return;
+      if (--envTimer <= 0)
+      {
+        envTimer = envPer;
+        if (envAdd && vol < 15) vol++;
+        else if (!envAdd && vol > 0) vol--;
+      }
+    };
+    tickEnv(aCh1.vol, aCh1.envVol0, aCh1.envAdd, aCh1.envPer, aCh1.envTimer, aCh1.on);
+    tickEnv(aCh2.vol, aCh2.envVol0, aCh2.envAdd, aCh2.envPer, aCh2.envTimer, aCh2.on);
+    tickEnv(aCh4.vol, aCh4.envVol0, aCh4.envAdd, aCh4.envPer, aCh4.envTimer, aCh4.on);
+  }
+}
+
+// ---- Generate one stereo sample ----
+static void apuNextSample(int16_t* L, int16_t* R)
+{
+  if (!apuOn) { *L = *R = 0; return; }
+
+  // Frame sequencer clock
+  if (++fsCounter >= FS_PERIOD) { fsCounter = 0; tickFS(); }
+
+  uint8_t nr51 = apuReg[0x25]; // FF25 — panning
+  int ml = 0, mr = 0;
+
+  // ---- CH1: square ----
+  if (aCh1.on)
+  {
+    aCh1.phase += aCh1.phaseInc;
+    int s = ((aCh1.phase >> 13) & 7) < DUTY[aCh1.dutyIdx] ? aCh1.vol : 0;
+    if (nr51 & 0x10) ml += s;
+    if (nr51 & 0x01) mr += s;
+  }
+
+  // ---- CH2: square ----
+  if (aCh2.on)
+  {
+    aCh2.phase += aCh2.phaseInc;
+    int s = ((aCh2.phase >> 13) & 7) < DUTY[aCh2.dutyIdx] ? aCh2.vol : 0;
+    if (nr51 & 0x20) ml += s;
+    if (nr51 & 0x02) mr += s;
+  }
+
+  // ---- CH3: wave table ----
+  if (aCh3.on && aCh3.dacOn)
+  {
+    aCh3.phase += aCh3.phaseInc;
+    int pos  = (aCh3.phase >> 8) & 31;
+    uint8_t wb = apuReg[0x20 + (pos >> 1)]; // wave RAM at FF30+
+    int nib  = (pos & 1) ? (wb & 0x0F) : (wb >> 4);
+    int s = 0;
+    switch (aCh3.outLevel)
+    {
+      case 1: s = nib;     break;
+      case 2: s = nib >> 1; break;
+      case 3: s = nib >> 2; break;
+    }
+    if (nr51 & 0x40) ml += s;
+    if (nr51 & 0x04) mr += s;
+  }
+
+  // ---- CH4: noise (LFSR) ----
+  if (aCh4.on)
+  {
+    aCh4.clkAcc += 256;
+    while (aCh4.clkAcc >= aCh4.clkPer)
+    {
+      aCh4.clkAcc -= aCh4.clkPer;
+      uint16_t x = (aCh4.lfsr ^ (aCh4.lfsr >> 1)) & 1;
+      aCh4.lfsr = (aCh4.lfsr >> 1) | (x << 14);
+      if (aCh4.shortMode) aCh4.lfsr = (aCh4.lfsr & ~0x40) | (x << 6);
+    }
+    int s = (~aCh4.lfsr & 1) ? aCh4.vol : 0;
+    if (nr51 & 0x80) ml += s;
+    if (nr51 & 0x08) mr += s;
+  }
+
+  // ---- Master volume scale (NR50) ----
+  // 4 channels * max 15 per channel = 60 max; vol 1-8 multiplier
+  uint8_t nr50 = apuReg[0x24];
+  int vl = ((nr50 >> 4) & 7) + 1;
+  int vr = (nr50 & 7) + 1;
+
+  *L = (int16_t)((ml * vl * 32767) / (60 * 8));
+  *R = (int16_t)((mr * vr * 32767) / (60 * 8));
+}
+
+// ---- audio_read: called by peanut_gb CPU read path ----
+extern "C" uint8_t audio_read(uint16_t addr)
+{
+  if (addr < 0xFF10 || addr > 0xFF3F) return 0xFF;
+  return apuReg[addr - 0xFF10];
+}
+
+// ---- audio_write: called by peanut_gb CPU write path ----
+extern "C" void audio_write(uint16_t addr, uint8_t val)
+{
+  if (addr < 0xFF10 || addr > 0xFF3F) return;
+  apuReg[addr - 0xFF10] = val;
+
+  switch (addr)
+  {
+    // ---- CH1 ----
+    case 0xFF11: aCh1.dutyIdx = (val>>6)&3; aCh1.lenTimer = 64-(val&63); break;
+    case 0xFF12:
+      aCh1.envVol0 = (val>>4)&15; aCh1.envAdd = (val>>3)&1;
+      aCh1.envPer  = val&7;
+      if (!(val & 0xF8)) aCh1.on = false; // DAC off
+      break;
+    case 0xFF13: aCh1.freqReg = (aCh1.freqReg & 0x700) | val; break;
+    case 0xFF14:
+      aCh1.freqReg = (aCh1.freqReg & 0xFF) | ((val&7)<<8);
+      aCh1.lenOn   = (val>>6)&1;
+      if (val & 0x80) trigCh1();
+      break;
+
+    // ---- CH2 ----
+    case 0xFF16: aCh2.dutyIdx = (val>>6)&3; aCh2.lenTimer = 64-(val&63); break;
+    case 0xFF17:
+      aCh2.envVol0 = (val>>4)&15; aCh2.envAdd = (val>>3)&1;
+      aCh2.envPer  = val&7;
+      if (!(val & 0xF8)) aCh2.on = false;
+      break;
+    case 0xFF18: aCh2.freqReg = (aCh2.freqReg & 0x700) | val; break;
+    case 0xFF19:
+      aCh2.freqReg = (aCh2.freqReg & 0xFF) | ((val&7)<<8);
+      aCh2.lenOn   = (val>>6)&1;
+      if (val & 0x80) trigCh2();
+      break;
+
+    // ---- CH3 ----
+    case 0xFF1A: aCh3.dacOn = (val>>7)&1; if (!aCh3.dacOn) aCh3.on = false; break;
+    case 0xFF1B: aCh3.lenTimer = 256 - val; break;
+    case 0xFF1C: aCh3.outLevel = (val>>5)&3; break;
+    case 0xFF1D: aCh3.freqReg = (aCh3.freqReg & 0x700) | val; break;
+    case 0xFF1E:
+      aCh3.freqReg = (aCh3.freqReg & 0xFF) | ((val&7)<<8);
+      aCh3.lenOn   = (val>>6)&1;
+      if (val & 0x80) trigCh3();
+      break;
+
+    // ---- CH4 ----
+    case 0xFF20: aCh4.lenTimer = 64-(val&63); break;
+    case 0xFF21:
+      aCh4.envVol0 = (val>>4)&15; aCh4.envAdd = (val>>3)&1;
+      aCh4.envPer  = val&7;
+      if (!(val & 0xF8)) aCh4.on = false;
+      break;
+    case 0xFF22:
+      aCh4.clkShift  = (val>>4)&15;
+      aCh4.shortMode = (val>>3)&1;
+      aCh4.divCode   = val&7;
+      break;
+    case 0xFF23:
+      aCh4.lenOn = (val>>6)&1;
+      if (val & 0x80) trigCh4();
+      break;
+
+    // ---- Master ----
+    case 0xFF26:
+      apuOn = (val>>7)&1;
+      if (!apuOn)
+      {
+        memset(apuReg, 0, 0x20);
+        aCh1.on = aCh2.on = aCh3.on = aCh4.on = false;
+      }
+      break;
+  }
+}
 
 //////////////////// EMULATOR ////////////////////
 
-struct gb_s  gb;
-uint16_t     scaledRow[320];
-int          activeRomIdx = 0;
+struct gb_s gb;
+uint16_t scaledRow[320];
 
-//////////////////// APP STATE ////////////////////
-
-enum AppState { STATE_MENU, STATE_GAME };
-AppState appState = STATE_MENU;
-int menuSelected  = 0;
-
-//////////////////// ROM ACCESS ////////////////////
-
-// Reads from PROGMEM — no RAM used for ROM data
-uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr)
-{
-  if (addr < ROM_LIST[activeRomIdx].size)
-    return pgm_read_byte(&ROM_LIST[activeRomIdx].data[addr]);
-  return 0xFF;
-}
-
-uint8_t cart_ram_read(struct gb_s* gb, const uint_fast32_t addr)
-{
-  return 0;
-}
-
-void cart_ram_write(struct gb_s* gb, const uint_fast32_t addr, const uint8_t val)
-{
-}
-
-//////////////////// GB ERROR ////////////////////
-
-void gb_error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr)
-{
-  Serial.print("GB ERROR: ");
-  Serial.println(err);
-}
-
-//////////////////// LCD DRAW — fullscreen stretch ////////////////////
+#define FRAME_TIME_MS 16
 
 void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
 {
   for (int x = 0; x < LCD_WIDTH; x++)
   {
     uint8_t p = pixels[x] & 3;
-    uint16_t color;
+    uint16_t c;
     switch (p)
     {
-      case 0: color = 0xFFFF; break;
-      case 1: color = 0xAD55; break;
-      case 2: color = 0x52AA; break;
-      default: color = 0x0000; break;
+      case 0: c = 0xFFFF; break;
+      case 1: c = 0xAD55; break;
+      case 2: c = 0x52AA; break;
+      default: c = 0x0000; break;
     }
-    scaledRow[x * 2]     = color;
-    scaledRow[x * 2 + 1] = color;
+    scaledRow[x*2] = scaledRow[x*2+1] = c;
   }
-
   int y0 = ((int)line * 240) / 144;
-  int y1 = ((int)(line + 1) * 240) / 144;
+  int y1 = ((int)(line+1) * 240) / 144;
   for (int sy = y0; sy < y1; sy++)
     tft.drawRGBBitmap(0, sy, scaledRow, 320, 1);
 }
 
-//////////////////// HELPERS ////////////////////
+//////////////////// ROM ACCESS ////////////////////
 
-void formatSize(uint32_t size, char* out)
+uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr) { return game_rom[addr]; }
+uint8_t cart_ram_read(struct gb_s* gb, const uint_fast32_t addr) { return 0; }
+void    cart_ram_write(struct gb_s* gb, const uint_fast32_t addr, const uint8_t val) {}
+
+void gb_error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr)
 {
-  if (size >= 1024 * 1024)
-    snprintf(out, 12, "%.1fMB", size / (1024.0f * 1024.0f));
-  else
-    snprintf(out, 12, "%uKB", (unsigned)(size / 1024));
+  Serial.print("GB ERROR: "); Serial.println(err);
 }
 
-//////////////////// MENU ////////////////////
+//////////////////// I2S INIT ////////////////////
 
-#define MENU_ITEM_H  36
-#define MENU_VISIBLE  5
-
-void drawMenu()
+void initI2S()
 {
-  tft.fillScreen(0x0000);
-
-  // Title bar
-  tft.fillRect(0, 0, 320, 40, 0x0319);
-  tft.setTextColor(0x07FF);
-  tft.setTextSize(2);
-  tft.setCursor(70, 12);
-  tft.print("SELECT GAME");
-
-  // ROM count
-  tft.setTextSize(1);
-  tft.setTextColor(0x8410);
-  tft.setCursor(252, 4);
-  tft.print(ROM_COUNT);
-  tft.print(" ROMs");
-
-  // Scanline background
-  for (int y = 40; y < 228; y += 4)
-    tft.drawFastHLine(0, y, 320, 0x0821);
-
-  // Scroll window
-  int scrollStart = max(0, min(menuSelected - 2,
-                               ROM_COUNT - MENU_VISIBLE));
-
-  for (int i = 0; i < MENU_VISIBLE; i++)
-  {
-    int idx = scrollStart + i;
-    if (idx >= ROM_COUNT) break;
-
-    int  y     = 46 + i * MENU_ITEM_H;
-    bool isSel = (idx == menuSelected);
-
-    if (isSel)
-    {
-      tft.fillRoundRect(6, y, 306, MENU_ITEM_H - 4, 6, 0x07FF);
-      tft.setTextColor(0x0000);
-    }
-    else
-    {
-      tft.drawRoundRect(6, y, 306, MENU_ITEM_H - 4, 6, 0x2945);
-      tft.setTextColor(0xFFFF);
-    }
-
-    // Arrow + name
-    tft.setTextSize(2);
-    tft.setCursor(16, y + 8);
-    tft.print(isSel ? "> " : "  ");
-
-    // Truncate long names
-    char truncated[18];
-    strncpy(truncated, ROM_LIST[idx].name, 17);
-    truncated[17] = '\0';
-    tft.print(truncated);
-
-    // Size on right
-    char sizeBuf[12];
-    formatSize(ROM_LIST[idx].size, sizeBuf);
-    tft.setTextSize(1);
-    tft.setTextColor(isSel ? 0x0000 : 0x8410);
-    tft.setCursor(268, y + 12);
-    tft.print(sizeBuf);
-  }
-
-  // Scrollbar
-  if (ROM_COUNT > MENU_VISIBLE)
-  {
-    int trackH = MENU_VISIBLE * MENU_ITEM_H;
-    int barH   = max(8, (MENU_VISIBLE * trackH) / ROM_COUNT);
-    int barY   = 46 + (scrollStart * (trackH - barH)) /
-                       max(1, ROM_COUNT - MENU_VISIBLE);
-    tft.fillRect(314, 46, 4, trackH, 0x2945);
-    tft.fillRect(314, barY, 4, barH, 0x07FF);
-  }
-
-  // Footer
-  tft.fillRect(0, 228, 320, 12, 0x0319);
-  tft.setTextColor(0x8410);
-  tft.setTextSize(1);
-  tft.setCursor(55, 231);
-  tft.print("[UP/DOWN] Navigate    [A] Launch");
+  i2s_config_t cfg = {
+    .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate          = SAMPLE_RATE,
+    .bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count        = 8,
+    .dma_buf_len          = 64,
+    .use_apll             = false,
+    .tx_desc_auto_clear   = true,
+  };
+  i2s_pin_config_t pins = {
+    .bck_io_num   = I2S_BCLK,
+    .ws_io_num    = I2S_LRC,
+    .data_out_num = I2S_DOUT,
+    .data_in_num  = I2S_PIN_NO_CHANGE,
+  };
+  i2s_driver_install(I2S_PORT, &cfg, 0, NULL);
+  i2s_set_pin(I2S_PORT, &pins);
+  i2s_zero_dma_buffer(I2S_PORT);
 }
 
-//////////////////// LAUNCH ROM ////////////////////
+//////////////////// AUDIO TASK (Core 0) ////////////////////
+// Drains ring buffer → MAX98357A, generates samples via apuNextSample
 
-void launchRom(int idx)
+void audioTask(void* param)
 {
-  activeRomIdx = idx;
+  const int CHUNK = 32;
+  int16_t out[CHUNK * 2];
 
-  // Loading screen
-  tft.fillScreen(0x0000);
-  tft.fillRect(0, 0, 320, 40, 0x0319);
-  tft.setTextColor(0x07FF);
-  tft.setTextSize(2);
-  tft.setCursor(90, 12);
-  tft.print("LOADING");
-
-  tft.setTextColor(0xFFFF);
-  tft.setTextSize(2);
-  tft.setCursor(20, 80);
-  tft.print(ROM_LIST[idx].name);
-
-  char sizeBuf[12];
-  formatSize(ROM_LIST[idx].size, sizeBuf);
-  tft.setTextColor(0x8410);
-  tft.setTextSize(1);
-  tft.setCursor(20, 108);
-  tft.print(sizeBuf);
-  tft.print(" in PROGMEM");
-
-  tft.setCursor(20, 130);
-  tft.print("Initializing emulator...");
-
-  enum gb_init_error_e ret = gb_init(
-    &gb,
-    rom_read,
-    cart_ram_read,
-    cart_ram_write,
-    gb_error,
-    NULL
-  );
-
-  if (ret != GB_INIT_NO_ERROR)
+  for (;;)
   {
-    tft.setTextColor(0xF800);
-    tft.setCursor(20, 155);
-    tft.print("gb_init FAILED: ");
-    tft.print((int)ret);
-    Serial.print("gb_init failed: ");
-    Serial.println((int)ret);
-    delay(2000);
-    drawMenu();
-    appState = STATE_MENU;
-    return;
+    int count = 0;
+    while (audioBufTail != audioBufHead && count < CHUNK)
+    {
+      out[count*2]   = audioBuf[audioBufTail*2];
+      out[count*2+1] = audioBuf[audioBufTail*2+1];
+      audioBufTail = (audioBufTail + 1) % AUDIO_BUF_SAMPLES;
+      count++;
+    }
+
+    // If ring buffer is low, synthesise directly to avoid gaps
+    if (count < CHUNK)
+    {
+      while (count < CHUNK)
+      {
+        apuNextSample(&out[count*2], &out[count*2+1]);
+        count++;
+      }
+    }
+
+    size_t written = 0;
+    i2s_write(I2S_PORT, out, CHUNK * 2 * sizeof(int16_t), &written, portMAX_DELAY);
+    vTaskDelay(1 / portTICK_PERIOD_MS);
   }
-
-  gb_init_lcd(&gb, lcd_draw);
-
-  tft.setTextColor(0x07E0);
-  tft.setCursor(20, 155);
-  tft.print("OK — starting!");
-  delay(500);
-
-  wifi_keys      = 0;
-  wifi_keys_prev = 0;
-  appState       = STATE_GAME;
 }
 
 //////////////////// WEB HANDLERS ////////////////////
 
-void handleRoot()    { server.send_P(200, "text/html", WEBPAGE); }
-
-void pressUp()     { wifi_keys |= JOYPAD_UP;     server.send(200,"text/plain","OK"); }
-void pressDown()   { wifi_keys |= JOYPAD_DOWN;   server.send(200,"text/plain","OK"); }
-void pressLeft()   { wifi_keys |= JOYPAD_LEFT;   server.send(200,"text/plain","OK"); }
-void pressRight()  { wifi_keys |= JOYPAD_RIGHT;  server.send(200,"text/plain","OK"); }
-void pressA()      { wifi_keys |= JOYPAD_A;      server.send(200,"text/plain","OK"); }
-void pressB()      { wifi_keys |= JOYPAD_B;      server.send(200,"text/plain","OK"); }
-void pressStart()  { wifi_keys |= JOYPAD_START;  server.send(200,"text/plain","OK"); }
-void pressSelect() { wifi_keys |= JOYPAD_SELECT; server.send(200,"text/plain","OK"); }
-void releaseKeys() { wifi_keys = 0;              server.send(200,"text/plain","OK"); }
+void handleRoot()      { server.send_P(200, "text/html", WEBPAGE); }
+void pressUp()     { wifi_keys |= JOYPAD_UP;     server.send(200, "text/plain", "OK"); }
+void pressDown()   { wifi_keys |= JOYPAD_DOWN;   server.send(200, "text/plain", "OK"); }
+void pressLeft()   { wifi_keys |= JOYPAD_LEFT;   server.send(200, "text/plain", "OK"); }
+void pressRight()  { wifi_keys |= JOYPAD_RIGHT;  server.send(200, "text/plain", "OK"); }
+void pressA()      { wifi_keys |= JOYPAD_A;      server.send(200, "text/plain", "OK"); }
+void pressB()      { wifi_keys |= JOYPAD_B;      server.send(200, "text/plain", "OK"); }
+void pressStart()  { wifi_keys |= JOYPAD_START;  server.send(200, "text/plain", "OK"); }
+void pressSelect() { wifi_keys |= JOYPAD_SELECT; server.send(200, "text/plain", "OK"); }
+void releaseKeys() { wifi_keys = 0;              server.send(200, "text/plain", "OK"); }
 
 //////////////////// SETUP ////////////////////
 
@@ -280,34 +463,29 @@ void setup()
 {
   Serial.begin(115200);
 
+  memset(apuReg, 0, sizeof(apuReg));
+  memset(&aCh1, 0, sizeof(aCh1));
+  memset(&aCh2, 0, sizeof(aCh2));
+  memset(&aCh3, 0, sizeof(aCh3));
+  memset(&aCh4, 0, sizeof(aCh4));
+  aCh4.lfsr = 0x7FFF;
+
   tft.begin();
   tft.setRotation(1);
   tft.fillScreen(0x0000);
+  tft.setTextColor(0x07FF); tft.setTextSize(2);
+  tft.setCursor(60, 90); tft.print("ESP32 GameBoy");
+  tft.setTextSize(1); tft.setTextColor(0x8410);
 
-  // Splash
-  tft.setTextColor(0x07FF);
-  tft.setTextSize(2);
-  tft.setCursor(55, 80);
-  tft.print("ESP32 GameBoy");
+  tft.setCursor(85, 116); tft.print("Starting audio...");
+  initI2S();
+  xTaskCreatePinnedToCore(audioTask, "audio", 2048, NULL, 1, NULL, 0);
 
-  tft.setTextSize(1);
-  tft.setTextColor(0x8410);
-  tft.setCursor(30, 115);
-  tft.print(ROM_COUNT);
-  tft.print(ROM_COUNT == 1 ? " ROM loaded" : " ROMs loaded");
-
-  tft.setCursor(30, 133);
-  tft.print("Starting WiFi...");
-
+  tft.setCursor(85, 130); tft.print("Starting WiFi...");
   WiFi.softAP(ssid, password);
-
-  tft.setTextColor(0x07E0);
-  tft.setCursor(30, 151);
-  tft.print("SSID: ");
-  tft.print(ssid);
-  tft.setCursor(30, 169);
-  tft.print("IP:   ");
-  tft.print(WiFi.softAPIP());
+  tft.setTextColor(0xFFFF);
+  tft.setCursor(70, 144); tft.print("SSID: "); tft.print(ssid);
+  tft.setCursor(70, 158); tft.print("IP:   "); tft.print(WiFi.softAPIP());
 
   server.on("/",        handleRoot);
   server.on("/up",      pressUp);
@@ -321,66 +499,29 @@ void setup()
   server.on("/release", releaseKeys);
   server.begin();
 
+  tft.setTextColor(0x8410);
+  tft.setCursor(85, 172); tft.print("Loading ROM...");
+
+  enum gb_init_error_e ret = gb_init(&gb, rom_read, cart_ram_read, cart_ram_write, gb_error, NULL);
+  if (ret != GB_INIT_NO_ERROR)
+  {
+    tft.setTextColor(0xF800);
+    tft.setCursor(85, 186); tft.print("ROM FAILED: "); tft.print((int)ret);
+    while (1);
+  }
+
+  gb_init_lcd(&gb, lcd_draw);
+  // NO gb_init_audio or gb_set_audio_callback — this version uses audio_read/write directly
   Serial.println("Ready");
-  delay(1200);
-  drawMenu();
 }
 
 //////////////////// LOOP ////////////////////
-
-#define FRAME_TIME_MS 16
 
 void loop()
 {
   server.handleClient();
 
-  uint8_t pressed = wifi_keys & ~wifi_keys_prev;
-  wifi_keys_prev  = wifi_keys;
-
-  // ── MENU ─────────────────────────────────────
-  if (appState == STATE_MENU)
-  {
-    bool redraw = false;
-    if (pressed & JOYPAD_UP)
-    {
-      menuSelected = (menuSelected - 1 + ROM_COUNT) % ROM_COUNT;
-      redraw = true;
-    }
-    if (pressed & JOYPAD_DOWN)
-    {
-      menuSelected = (menuSelected + 1) % ROM_COUNT;
-      redraw = true;
-    }
-    if (redraw) drawMenu();
-    if (pressed & JOYPAD_A) launchRom(menuSelected);
-
-    delay(16);
-    return;
-  }
-
-  // ── GAME ─────────────────────────────────────
   uint32_t frame_start = millis();
-
-  // Hold SELECT + START for 2 seconds to return to menu
-  static uint32_t exit_hold_start = 0;
-  if ((wifi_keys & JOYPAD_SELECT) && (wifi_keys & JOYPAD_START))
-  {
-    if (exit_hold_start == 0) exit_hold_start = millis();
-    if (millis() - exit_hold_start > 2000)
-    {
-      exit_hold_start = 0;
-      wifi_keys       = 0;
-      wifi_keys_prev  = 0;
-      appState        = STATE_MENU;
-      drawMenu();
-      return;
-    }
-  }
-  else
-  {
-    exit_hold_start = 0;
-  }
-
   gb.direct.joypad = ~wifi_keys;
   gb_run_frame(&gb);
 
