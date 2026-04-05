@@ -7,7 +7,6 @@
 #include "driver/i2s.h"
 
 // ADD these three lines right before the peanut_gb include block
-// Forward-declare so peanut_gb.h can see them at include time
 extern "C" uint8_t audio_read(uint16_t addr);
 extern "C" void    audio_write(uint16_t addr, uint8_t val);
 
@@ -25,6 +24,8 @@ extern "C" {
 const unsigned char* game_rom = nullptr;
 uint32_t game_rom_size = 0;
 int current_game = 0;
+bool game_selected = false;
+int selected_index = 0;
 
 //////////////////// WIFI ////////////////////
 
@@ -55,15 +56,10 @@ static volatile int audioBufHead = 0;
 static volatile int audioBufTail = 0;
 
 //////////////////// GB APU ////////////////////
-// peanut_gb calls audio_read / audio_write from the CPU R/W path.
-// We store all registers and synthesise audio from them each sample.
 
-static uint8_t apuReg[0x30]; // indexed by addr - 0xFF10
+static uint8_t apuReg[0x30];
+static const uint8_t DUTY[4] = { 1, 2, 4, 6 };
 
-// ---- Duty table: steps HIGH out of 8 ----
-static const uint8_t DUTY[4] = { 1, 2, 4, 6 }; // 12.5 / 25 / 50 / 75 %
-
-// ---- Per-channel state ----
 struct SquareCh {
   bool    on;
   uint8_t dutyIdx;
@@ -71,16 +67,16 @@ struct SquareCh {
   bool    envAdd;
   int     envPer, envTimer;
   int     freqReg;
-  uint32_t phase, phaseInc; // 8-step fixed-point (<<13)
+  uint32_t phase, phaseInc;
   int     lenTimer;
   bool    lenOn;
 };
 
 struct WaveCh {
   bool    on, dacOn;
-  int     outLevel;         // 0=mute 1=100% 2=50% 3=25%
+  int     outLevel;
   int     freqReg;
-  uint32_t phase, phaseInc; // 32-sample fixed-point (<<8)
+  uint32_t phase, phaseInc;
   int     lenTimer;
   bool    lenOn;
 };
@@ -103,22 +99,22 @@ static WaveCh   aCh3;
 static NoiseCh  aCh4;
 static bool     apuOn = true;
 
-// ---- Frame sequencer (512 Hz → length/envelope clocking) ----
 static int fsCounter = 0;
 static int fsStep    = 0;
-#define FS_PERIOD (SAMPLE_RATE / 512)   // ~43 samples
+#define FS_PERIOD (SAMPLE_RATE / 512)
 
-// ---- Phase increment helpers ----
 static uint32_t sqInc(int f)
 {
   if (f >= 2048) return 0;
   return (uint32_t)(131072.0f / (2048 - f) * 8.0f / SAMPLE_RATE * 8192.0f);
 }
+
 static uint32_t wvInc(int f)
 {
   if (f >= 2048) return 0;
   return (uint32_t)(65536.0f / (2048 - f) * 32.0f / SAMPLE_RATE * 256.0f);
 }
+
 static uint32_t noiseClkPer(int shift, int div)
 {
   float d = div == 0 ? 0.5f : (float)div;
@@ -127,7 +123,6 @@ static uint32_t noiseClkPer(int shift, int div)
   return (uint32_t)(SAMPLE_RATE / hz * 256.0f);
 }
 
-// ---- Trigger functions ----
 static void trigCh1()
 {
   aCh1.on      = true;
@@ -136,6 +131,7 @@ static void trigCh1()
   if (!aCh1.lenTimer) aCh1.lenTimer = 64;
   aCh1.phaseInc = sqInc(aCh1.freqReg);
 }
+
 static void trigCh2()
 {
   aCh2.on      = true;
@@ -144,6 +140,7 @@ static void trigCh2()
   if (!aCh2.lenTimer) aCh2.lenTimer = 64;
   aCh2.phaseInc = sqInc(aCh2.freqReg);
 }
+
 static void trigCh3()
 {
   aCh3.on    = true;
@@ -151,6 +148,7 @@ static void trigCh3()
   if (!aCh3.lenTimer) aCh3.lenTimer = 256;
   aCh3.phaseInc = wvInc(aCh3.freqReg);
 }
+
 static void trigCh4()
 {
   aCh4.on       = true;
@@ -162,7 +160,6 @@ static void trigCh4()
   aCh4.clkAcc   = 0;
 }
 
-// ---- Frame sequencer tick ----
 static void tickFS()
 {
   fsStep = (fsStep + 1) & 7;
@@ -193,7 +190,6 @@ static void tickFS()
   }
 }
 
-// ---- Generate one stereo sample ----
 static void apuNextSample(int16_t* L, int16_t* R)
 {
   if (!apuOn) { *L = *R = 0; return; }
@@ -259,14 +255,12 @@ static void apuNextSample(int16_t* L, int16_t* R)
   *R = (int16_t)((mr * vr * 32767) / (60 * 8));
 }
 
-// ---- audio_read: called by peanut_gb CPU read path ----
 extern "C" uint8_t audio_read(uint16_t addr)
 {
   if (addr < 0xFF10 || addr > 0xFF3F) return 0xFF;
   return apuReg[addr - 0xFF10];
 }
 
-// ---- audio_write: called by peanut_gb CPU write path ----
 extern "C" void audio_write(uint16_t addr, uint8_t val)
 {
   if (addr < 0xFF10 || addr > 0xFF3F) return;
@@ -393,25 +387,57 @@ void load_game(int game_index) {
     Serial.print("Loading: ");
     Serial.println(game.name);
     
-    tft.fillScreen(0x0000);
-    tft.setTextColor(0x07FF);
-    tft.setCursor(0, 0);
-    tft.print("Loading: ");
-    tft.println(game.name);
-    
     enum gb_init_error_e ret = gb_init(&gb, rom_read, cart_ram_read, cart_ram_write, gb_error, NULL);
     if (ret != GB_INIT_NO_ERROR)
     {
       Serial.print("ROM FAILED: ");
       Serial.println((int)ret);
-      tft.setTextColor(0xF800);
-      tft.print("ROM FAILED: ");
-      tft.println((int)ret);
       while(1);
     }
     
     gb_init_lcd(&gb, lcd_draw);
   }
+}
+
+void drawGameMenu() {
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setTextSize(2);
+  tft.setCursor(40, 10);
+  tft.print("ESP32 GameBoy");
+  
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(30, 45);
+  tft.print("Select a game from web:");
+  
+  tft.setTextSize(2);
+  
+  for (int i = 0; i < GAME_COUNT; i++) {
+    GameROM game;
+    memcpy_P(&game, &GAMES[i], sizeof(GameROM));
+    
+    int y = 80 + i * 35;
+    
+    if (i == selected_index) {
+      tft.fillRect(20, y - 8, 280, 30, ILI9341_BLUE);
+      tft.setTextColor(ILI9341_YELLOW);
+    } else {
+      tft.setTextColor(ILI9341_WHITE);
+    }
+    
+    tft.setCursor(30, y);
+    tft.print(game.name);
+  }
+  
+  tft.setTextColor(ILI9341_GREEN);
+  tft.setTextSize(1);
+  tft.setCursor(30, 210);
+  tft.print("Connect to WiFi: ");
+  tft.print(ssid);
+  tft.setCursor(30, 225);
+  tft.print("IP: ");
+  tft.print(WiFi.softAPIP());
 }
 
 //////////////////// I2S INIT ////////////////////
@@ -441,7 +467,7 @@ void initI2S()
   i2s_zero_dma_buffer(I2S_PORT);
 }
 
-//////////////////// AUDIO TASK (Core 0) ////////////////////
+//////////////////// AUDIO TASK ////////////////////
 
 void audioTask(void* param)
 {
@@ -477,6 +503,9 @@ void audioTask(void* param)
 //////////////////// WEB HANDLERS ////////////////////
 
 void handleRoot() { server.send_P(200, "text/html", WEBPAGE); }
+void handleSelectGame() { server.send(200, "text/plain", "OK"); }
+void handleController() { server.send_P(200, "text/html", WEBPAGE); }
+void handleCurrentGame() { server.send(200, "text/plain", "Game"); }
 void pressUp()     { wifi_keys |= JOYPAD_UP;     server.send(200, "text/plain", "OK"); }
 void pressDown()   { wifi_keys |= JOYPAD_DOWN;   server.send(200, "text/plain", "OK"); }
 void pressLeft()   { wifi_keys |= JOYPAD_LEFT;   server.send(200, "text/plain", "OK"); }
@@ -493,6 +522,7 @@ void setup()
 {
   Serial.begin(115200);
   
+  // Initialize APU
   memset(apuReg, 0, sizeof(apuReg));
   memset(&aCh1, 0, sizeof(aCh1));
   memset(&aCh2, 0, sizeof(aCh2));
@@ -500,24 +530,20 @@ void setup()
   memset(&aCh4, 0, sizeof(aCh4));
   aCh4.lfsr = 0x7FFF;
 
+  // Initialize display
   tft.begin();
   tft.setRotation(1);
-  tft.fillScreen(0x0000);
-  tft.setTextColor(0x07FF); tft.setTextSize(2);
-  tft.setCursor(60, 90); tft.print("ESP32 GameBoy");
-  tft.setTextSize(1); tft.setTextColor(0x8410);
-
-  tft.setCursor(85, 116); tft.print("Starting audio...");
+  
+  // Initialize I2S
   initI2S();
-  xTaskCreatePinnedToCore(audioTask, "audio", 2048, NULL, 1, NULL, 0);
-
-  tft.setCursor(85, 130); tft.print("Starting WiFi...");
+  
+  // Start audio task
+  xTaskCreatePinnedToCore(audioTask, "audio", 4096, NULL, 1, NULL, 0);
+  
+  // Setup WiFi
   WiFi.softAP(ssid, password);
-  tft.setTextColor(0xFFFF);
-  tft.setCursor(70, 144); tft.print("SSID: "); tft.print(ssid);
-  tft.setCursor(70, 158); tft.print("IP:   "); tft.print(WiFi.softAPIP());
-
-  // Web server routes
+  
+  // Setup web server - only essential routes
   server.on("/", handleRoot);
   server.on("/up", pressUp);
   server.on("/down", pressDown);
@@ -529,12 +555,18 @@ void setup()
   server.on("/select", pressSelect);
   server.on("/release", releaseKeys);
   server.begin();
-
-  tft.setTextColor(0x8410);
-  tft.setCursor(85, 172); tft.print("Loading ROM...");
-
+  
+  // Draw menu on TFT
+  drawGameMenu();
+  
+  // Wait 5 seconds then load first game
+  delay(5000);
+  
   // Load first game
   load_game(0);
+  
+  // Clear screen for game
+  tft.fillScreen(ILI9341_BLACK);
 }
 
 //////////////////// LOOP ////////////////////
