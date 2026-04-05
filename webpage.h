@@ -178,6 +178,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     display: flex;
     align-items: center;
     justify-content: center;
+    touch-action: manipulation;
   }
 
   .btn-dpad.held, .btn-dpad:active {
@@ -219,6 +220,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     box-shadow: 0 5px 0 #000;
     transition: background 0.08s, transform 0.08s, box-shadow 0.08s;
     color: #fff;
+    touch-action: manipulation;
   }
 
   .btn-ab.held, .btn-ab:active {
@@ -339,20 +341,24 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
       <div class="dpad">
         <div></div>
         <button id="up" class="btn-dpad"
-          ontouchstart="press('/up',this)" ontouchend="release(this)"
-          onmousedown="press('/up',this)" onmouseup="release(this)">▲</button>
+          ontouchstart="pressStart('/up', this)" ontouchend="pressEnd('/up', this)"
+          onmousedown="pressStart('/up', this)" onmouseup="pressEnd('/up', this)"
+          onmouseleave="pressEnd('/up', this)">▲</button>
         <div></div>
         <button id="left" class="btn-dpad"
-          ontouchstart="press('/left',this)" ontouchend="release(this)"
-          onmousedown="press('/left',this)" onmouseup="release(this)">◀</button>
+          ontouchstart="pressStart('/left', this)" ontouchend="pressEnd('/left', this)"
+          onmousedown="pressStart('/left', this)" onmouseup="pressEnd('/left', this)"
+          onmouseleave="pressEnd('/left', this)">◀</button>
         <div class="btn-dpad dpad-center"></div>
         <button id="right" class="btn-dpad"
-          ontouchstart="press('/right',this)" ontouchend="release(this)"
-          onmousedown="press('/right',this)" onmouseup="release(this)">▶</button>
+          ontouchstart="pressStart('/right', this)" ontouchend="pressEnd('/right', this)"
+          onmousedown="pressStart('/right', this)" onmouseup="pressEnd('/right', this)"
+          onmouseleave="pressEnd('/right', this)">▶</button>
         <div></div>
         <button id="down" class="btn-dpad"
-          ontouchstart="press('/down',this)" ontouchend="release(this)"
-          onmousedown="press('/down',this)" onmouseup="release(this)">▼</button>
+          ontouchstart="pressStart('/down', this)" ontouchend="pressEnd('/down', this)"
+          onmousedown="pressStart('/down', this)" onmouseup="pressEnd('/down', this)"
+          onmouseleave="pressEnd('/down', this)">▼</button>
         <div></div>
       </div>
     </div>
@@ -363,11 +369,13 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
       </div>
       <div class="sys-row">
         <button id="select" class="btn-sys"
-          ontouchstart="press('/select',this)" ontouchend="release(this)"
-          onmousedown="press('/select',this)" onmouseup="release(this)">SELECT</button>
+          ontouchstart="pressStart('/select', this)" ontouchend="pressEnd('/select', this)"
+          onmousedown="pressStart('/select', this)" onmouseup="pressEnd('/select', this)"
+          onmouseleave="pressEnd('/select', this)">SELECT</button>
         <button id="start" class="btn-sys"
-          ontouchstart="press('/start',this)" ontouchend="release(this)"
-          onmousedown="press('/start',this)" onmouseup="release(this)">START</button>
+          ontouchstart="pressStart('/start', this)" ontouchend="pressEnd('/start', this)"
+          onmousedown="pressStart('/start', this)" onmouseup="pressEnd('/start', this)"
+          onmouseleave="pressEnd('/start', this)">START</button>
         <button id="menu" class="btn-menu" onclick="exitToMenu()">MENU</button>
       </div>
     </div>
@@ -375,11 +383,13 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     <div class="right-side">
       <div class="ab-grid">
         <button id="a" class="btn-ab btn-a"
-          ontouchstart="press('/a',this)" ontouchend="release(this)"
-          onmousedown="press('/a',this)" onmouseup="release(this)">A</button>
+          ontouchstart="pressStart('/a', this)" ontouchend="pressEnd('/a', this)"
+          onmousedown="pressStart('/a', this)" onmouseup="pressEnd('/a', this)"
+          onmouseleave="pressEnd('/a', this)">A</button>
         <button id="b" class="btn-ab btn-b"
-          ontouchstart="press('/b',this)" ontouchend="release(this)"
-          onmousedown="press('/b',this)" onmouseup="release(this)">B</button>
+          ontouchstart="pressStart('/b', this)" ontouchend="pressEnd('/b', this)"
+          onmousedown="pressStart('/b', this)" onmouseup="pressEnd('/b', this)"
+          onmouseleave="pressEnd('/b', this)">B</button>
       </div>
       <div class="ab-labels">
         <div class="ab-label">B</div>
@@ -391,25 +401,59 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 </div>
 
 <script>
-  let held = null;
+  // Track which buttons are currently pressed
+  let activeButtons = new Set();
+  let statusTimeout = null;
 
-  function press(cmd, el) {
-    if (held && held !== el) release(held);
-    held = el;
-    el.classList.add('held');
-    fetch(cmd).catch(() => {});
-    document.getElementById('status').textContent = cmd.replace('/', '').toUpperCase();
+  function updateStatus() {
+    if (activeButtons.size > 0) {
+      let statusText = Array.from(activeButtons).join(' + ').toUpperCase();
+      document.getElementById('status').textContent = statusText;
+      if (statusTimeout) clearTimeout(statusTimeout);
+      statusTimeout = setTimeout(() => {
+        if (activeButtons.size === 0) {
+          document.getElementById('status').textContent = 'Ready';
+        }
+      }, 500);
+    }
   }
 
-  function release(el) {
-    if (!el) return;
-    el.classList.remove('held');
-    held = null;
-    fetch('/release').catch(() => {});
-    document.getElementById('status').textContent = 'Ready';
+  function pressStart(cmd, el) {
+    // Prevent default to avoid double events
+    event.preventDefault();
+    
+    // Add button to active set if not already there
+    if (!activeButtons.has(cmd)) {
+      activeButtons.add(cmd);
+      el.classList.add('held');
+      fetch(cmd).catch(() => {});
+      updateStatus();
+    }
+  }
+
+  function pressEnd(cmd, el) {
+    // Prevent default
+    event.preventDefault();
+    
+    // Remove button from active set
+    if (activeButtons.has(cmd)) {
+      activeButtons.delete(cmd);
+      el.classList.remove('held');
+      
+      // Only send release when NO buttons are pressed
+      if (activeButtons.size === 0) {
+        fetch('/release').catch(() => {});
+        updateStatus();
+      }
+    }
   }
 
   function exitToMenu() {
+    // Clear all active buttons first
+    if (activeButtons.size > 0) {
+      fetch('/release').catch(() => {});
+      activeButtons.clear();
+    }
     fetch('/exit').then(() => {
       location.reload();
     }).catch(() => {
@@ -458,51 +502,71 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
       });
   }
 
-  // Keyboard support
+  // Keyboard support for multiple simultaneous keys
   document.addEventListener('contextmenu', e => e.preventDefault());
 
   const keyMap = {
-    ArrowUp:    '/up',
-    ArrowDown:  '/down',
-    ArrowLeft:  '/left',
-    ArrowRight: '/right',
-    z:          '/a',
-    Z:          '/a',
-    x:          '/b',
-    X:          '/b',
-    Enter:      '/start',
-    Shift:      '/select',
-    Escape:     '/exit',
+    'ArrowUp': '/up',
+    'ArrowDown': '/down',
+    'ArrowLeft': '/left',
+    'ArrowRight': '/right',
+    'z': '/a',
+    'Z': '/a',
+    'x': '/b',
+    'X': '/b',
+    'Enter': '/start',
+    'Shift': '/select',
   };
 
-  const heldKeys = new Set();
+  const activeKeys = new Set();
 
   document.addEventListener('keydown', e => {
-    if (heldKeys.has(e.key) || !keyMap[e.key]) return;
-    e.preventDefault();
-    heldKeys.add(e.key);
     const cmd = keyMap[e.key];
-    const btnId = cmd.replace('/', '');
-    const el = document.getElementById(btnId);
-    if (el && cmd !== '/exit') {
-      el.classList.add('held');
+    if (!cmd) return;
+    
+    e.preventDefault();
+    
+    if (!activeKeys.has(cmd)) {
+      activeKeys.add(cmd);
+      const btnId = cmd.replace('/', '');
+      const el = document.getElementById(btnId);
+      if (el) el.classList.add('held');
+      fetch(cmd).catch(() => {});
+      
+      let statusText = Array.from(activeKeys).map(c => c.replace('/', '').toUpperCase()).join(' + ');
+      document.getElementById('status').textContent = statusText;
     }
-    fetch(cmd).catch(() => {});
-    if (cmd === '/exit') {
-      location.reload();
-    }
-    document.getElementById('status').textContent = cmd.replace('/', '').toUpperCase();
   });
 
   document.addEventListener('keyup', e => {
-    if (!keyMap[e.key]) return;
-    heldKeys.delete(e.key);
     const cmd = keyMap[e.key];
-    const btnId = cmd.replace('/', '');
-    const el = document.getElementById(btnId);
-    if (el) el.classList.remove('held');
-    if (heldKeys.size === 0 && cmd !== '/exit') {
+    if (!cmd) return;
+    
+    e.preventDefault();
+    
+    if (activeKeys.has(cmd)) {
+      activeKeys.delete(cmd);
+      const btnId = cmd.replace('/', '');
+      const el = document.getElementById(btnId);
+      if (el) el.classList.remove('held');
+      
+      if (activeKeys.size === 0) {
+        fetch('/release').catch(() => {});
+        document.getElementById('status').textContent = 'Ready';
+      } else {
+        let statusText = Array.from(activeKeys).map(c => c.replace('/', '').toUpperCase()).join(' + ');
+        document.getElementById('status').textContent = statusText;
+      }
+    }
+  });
+
+  // Handle window/tab blur - release all keys
+  window.addEventListener('blur', () => {
+    if (activeKeys.size > 0 || activeButtons.size > 0) {
       fetch('/release').catch(() => {});
+      activeKeys.clear();
+      activeButtons.clear();
+      document.querySelectorAll('.held').forEach(el => el.classList.remove('held'));
       document.getElementById('status').textContent = 'Ready';
     }
   });
