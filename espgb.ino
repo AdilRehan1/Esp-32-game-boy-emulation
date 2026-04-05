@@ -17,8 +17,14 @@ extern "C" {
 #include "peanut_gb.h"
 }
 
-#include "rom_tetris.h"
+// Include ROM manager and webpage
+#include "rom_manager.h"
 #include "webpage.h"
+
+// Global variables for current game
+const unsigned char* game_rom = nullptr;
+uint32_t game_rom_size = 0;
+int current_game = 0;
 
 //////////////////// WIFI ////////////////////
 
@@ -105,19 +111,16 @@ static int fsStep    = 0;
 // ---- Phase increment helpers ----
 static uint32_t sqInc(int f)
 {
-  // GB square freq = 131072 / (2048-f) Hz, 8 steps/period, fixed <<13
   if (f >= 2048) return 0;
   return (uint32_t)(131072.0f / (2048 - f) * 8.0f / SAMPLE_RATE * 8192.0f);
 }
 static uint32_t wvInc(int f)
 {
-  // GB wave freq = 65536 / (2048-f) Hz, 32 samples/period, fixed <<8
   if (f >= 2048) return 0;
   return (uint32_t)(65536.0f / (2048 - f) * 32.0f / SAMPLE_RATE * 256.0f);
 }
 static uint32_t noiseClkPer(int shift, int div)
 {
-  // Clock period in samples (fixed <<8)
   float d = div == 0 ? 0.5f : (float)div;
   float hz = 524288.0f / d / (float)(1 << (shift + 1));
   if (hz < 1.0f) return 0xFFFFFF;
@@ -164,7 +167,6 @@ static void tickFS()
 {
   fsStep = (fsStep + 1) & 7;
 
-  // Length counter at steps 0,2,4,6 (256 Hz)
   if (!(fsStep & 1))
   {
     if (aCh1.lenOn && aCh1.lenTimer > 0 && --aCh1.lenTimer == 0) aCh1.on = false;
@@ -173,7 +175,6 @@ static void tickFS()
     if (aCh4.lenOn && aCh4.lenTimer > 0 && --aCh4.lenTimer == 0) aCh4.on = false;
   }
 
-  // Envelope at step 7 (64 Hz)
   if (fsStep == 7)
   {
     auto tickEnv = [](int& vol, int envVol0, bool envAdd, int envPer, int& envTimer, bool on)
@@ -197,13 +198,11 @@ static void apuNextSample(int16_t* L, int16_t* R)
 {
   if (!apuOn) { *L = *R = 0; return; }
 
-  // Frame sequencer clock
   if (++fsCounter >= FS_PERIOD) { fsCounter = 0; tickFS(); }
 
-  uint8_t nr51 = apuReg[0x25]; // FF25 — panning
+  uint8_t nr51 = apuReg[0x25];
   int ml = 0, mr = 0;
 
-  // ---- CH1: square ----
   if (aCh1.on)
   {
     aCh1.phase += aCh1.phaseInc;
@@ -212,7 +211,6 @@ static void apuNextSample(int16_t* L, int16_t* R)
     if (nr51 & 0x01) mr += s;
   }
 
-  // ---- CH2: square ----
   if (aCh2.on)
   {
     aCh2.phase += aCh2.phaseInc;
@@ -221,12 +219,11 @@ static void apuNextSample(int16_t* L, int16_t* R)
     if (nr51 & 0x02) mr += s;
   }
 
-  // ---- CH3: wave table ----
   if (aCh3.on && aCh3.dacOn)
   {
     aCh3.phase += aCh3.phaseInc;
     int pos  = (aCh3.phase >> 8) & 31;
-    uint8_t wb = apuReg[0x20 + (pos >> 1)]; // wave RAM at FF30+
+    uint8_t wb = apuReg[0x20 + (pos >> 1)];
     int nib  = (pos & 1) ? (wb & 0x0F) : (wb >> 4);
     int s = 0;
     switch (aCh3.outLevel)
@@ -239,7 +236,6 @@ static void apuNextSample(int16_t* L, int16_t* R)
     if (nr51 & 0x04) mr += s;
   }
 
-  // ---- CH4: noise (LFSR) ----
   if (aCh4.on)
   {
     aCh4.clkAcc += 256;
@@ -255,8 +251,6 @@ static void apuNextSample(int16_t* L, int16_t* R)
     if (nr51 & 0x08) mr += s;
   }
 
-  // ---- Master volume scale (NR50) ----
-  // 4 channels * max 15 per channel = 60 max; vol 1-8 multiplier
   uint8_t nr50 = apuReg[0x24];
   int vl = ((nr50 >> 4) & 7) + 1;
   int vr = (nr50 & 7) + 1;
@@ -280,12 +274,11 @@ extern "C" void audio_write(uint16_t addr, uint8_t val)
 
   switch (addr)
   {
-    // ---- CH1 ----
     case 0xFF11: aCh1.dutyIdx = (val>>6)&3; aCh1.lenTimer = 64-(val&63); break;
     case 0xFF12:
       aCh1.envVol0 = (val>>4)&15; aCh1.envAdd = (val>>3)&1;
       aCh1.envPer  = val&7;
-      if (!(val & 0xF8)) aCh1.on = false; // DAC off
+      if (!(val & 0xF8)) aCh1.on = false;
       break;
     case 0xFF13: aCh1.freqReg = (aCh1.freqReg & 0x700) | val; break;
     case 0xFF14:
@@ -293,8 +286,6 @@ extern "C" void audio_write(uint16_t addr, uint8_t val)
       aCh1.lenOn   = (val>>6)&1;
       if (val & 0x80) trigCh1();
       break;
-
-    // ---- CH2 ----
     case 0xFF16: aCh2.dutyIdx = (val>>6)&3; aCh2.lenTimer = 64-(val&63); break;
     case 0xFF17:
       aCh2.envVol0 = (val>>4)&15; aCh2.envAdd = (val>>3)&1;
@@ -307,8 +298,6 @@ extern "C" void audio_write(uint16_t addr, uint8_t val)
       aCh2.lenOn   = (val>>6)&1;
       if (val & 0x80) trigCh2();
       break;
-
-    // ---- CH3 ----
     case 0xFF1A: aCh3.dacOn = (val>>7)&1; if (!aCh3.dacOn) aCh3.on = false; break;
     case 0xFF1B: aCh3.lenTimer = 256 - val; break;
     case 0xFF1C: aCh3.outLevel = (val>>5)&3; break;
@@ -318,8 +307,6 @@ extern "C" void audio_write(uint16_t addr, uint8_t val)
       aCh3.lenOn   = (val>>6)&1;
       if (val & 0x80) trigCh3();
       break;
-
-    // ---- CH4 ----
     case 0xFF20: aCh4.lenTimer = 64-(val&63); break;
     case 0xFF21:
       aCh4.envVol0 = (val>>4)&15; aCh4.envAdd = (val>>3)&1;
@@ -335,8 +322,6 @@ extern "C" void audio_write(uint16_t addr, uint8_t val)
       aCh4.lenOn = (val>>6)&1;
       if (val & 0x80) trigCh4();
       break;
-
-    // ---- Master ----
     case 0xFF26:
       apuOn = (val>>7)&1;
       if (!apuOn)
@@ -378,13 +363,55 @@ void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
 
 //////////////////// ROM ACCESS ////////////////////
 
-uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr) { return game_rom[addr]; }
+uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr) 
+{ 
+  if (addr < game_rom_size) {
+    return game_rom[addr];
+  }
+  return 0xFF;
+}
+
 uint8_t cart_ram_read(struct gb_s* gb, const uint_fast32_t addr) { return 0; }
 void    cart_ram_write(struct gb_s* gb, const uint_fast32_t addr, const uint8_t val) {}
 
 void gb_error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr)
 {
   Serial.print("GB ERROR: "); Serial.println(err);
+}
+
+//////////////////// GAME SELECTION ////////////////////
+
+void load_game(int game_index) {
+  if (game_index >= 0 && game_index < GAME_COUNT) {
+    GameROM game;
+    memcpy_P(&game, &GAMES[game_index], sizeof(GameROM));
+    
+    game_rom = game.data;
+    game_rom_size = game.size;
+    current_game = game_index;
+    
+    Serial.print("Loading: ");
+    Serial.println(game.name);
+    
+    tft.fillScreen(0x0000);
+    tft.setTextColor(0x07FF);
+    tft.setCursor(0, 0);
+    tft.print("Loading: ");
+    tft.println(game.name);
+    
+    enum gb_init_error_e ret = gb_init(&gb, rom_read, cart_ram_read, cart_ram_write, gb_error, NULL);
+    if (ret != GB_INIT_NO_ERROR)
+    {
+      Serial.print("ROM FAILED: ");
+      Serial.println((int)ret);
+      tft.setTextColor(0xF800);
+      tft.print("ROM FAILED: ");
+      tft.println((int)ret);
+      while(1);
+    }
+    
+    gb_init_lcd(&gb, lcd_draw);
+  }
 }
 
 //////////////////// I2S INIT ////////////////////
@@ -415,7 +442,6 @@ void initI2S()
 }
 
 //////////////////// AUDIO TASK (Core 0) ////////////////////
-// Drains ring buffer → MAX98357A, generates samples via apuNextSample
 
 void audioTask(void* param)
 {
@@ -433,7 +459,6 @@ void audioTask(void* param)
       count++;
     }
 
-    // If ring buffer is low, synthesise directly to avoid gaps
     if (count < CHUNK)
     {
       while (count < CHUNK)
@@ -451,7 +476,7 @@ void audioTask(void* param)
 
 //////////////////// WEB HANDLERS ////////////////////
 
-void handleRoot()      { server.send_P(200, "text/html", WEBPAGE); }
+void handleRoot() { server.send_P(200, "text/html", WEBPAGE); }
 void pressUp()     { wifi_keys |= JOYPAD_UP;     server.send(200, "text/plain", "OK"); }
 void pressDown()   { wifi_keys |= JOYPAD_DOWN;   server.send(200, "text/plain", "OK"); }
 void pressLeft()   { wifi_keys |= JOYPAD_LEFT;   server.send(200, "text/plain", "OK"); }
@@ -467,7 +492,7 @@ void releaseKeys() { wifi_keys = 0;              server.send(200, "text/plain", 
 void setup()
 {
   Serial.begin(115200);
-
+  
   memset(apuReg, 0, sizeof(apuReg));
   memset(&aCh1, 0, sizeof(aCh1));
   memset(&aCh2, 0, sizeof(aCh2));
@@ -492,32 +517,24 @@ void setup()
   tft.setCursor(70, 144); tft.print("SSID: "); tft.print(ssid);
   tft.setCursor(70, 158); tft.print("IP:   "); tft.print(WiFi.softAPIP());
 
-  server.on("/",        handleRoot);
-  server.on("/up",      pressUp);
-  server.on("/down",    pressDown);
-  server.on("/left",    pressLeft);
-  server.on("/right",   pressRight);
-  server.on("/a",       pressA);
-  server.on("/b",       pressB);
-  server.on("/start",   pressStart);
-  server.on("/select",  pressSelect);
+  // Web server routes
+  server.on("/", handleRoot);
+  server.on("/up", pressUp);
+  server.on("/down", pressDown);
+  server.on("/left", pressLeft);
+  server.on("/right", pressRight);
+  server.on("/a", pressA);
+  server.on("/b", pressB);
+  server.on("/start", pressStart);
+  server.on("/select", pressSelect);
   server.on("/release", releaseKeys);
   server.begin();
 
   tft.setTextColor(0x8410);
   tft.setCursor(85, 172); tft.print("Loading ROM...");
 
-  enum gb_init_error_e ret = gb_init(&gb, rom_read, cart_ram_read, cart_ram_write, gb_error, NULL);
-  if (ret != GB_INIT_NO_ERROR)
-  {
-    tft.setTextColor(0xF800);
-    tft.setCursor(85, 186); tft.print("ROM FAILED: "); tft.print((int)ret);
-    while (1);
-  }
-
-  gb_init_lcd(&gb, lcd_draw);
-  // NO gb_init_audio or gb_set_audio_callback — this version uses audio_read/write directly
-  Serial.println("Ready");
+  // Load first game
+  load_game(0);
 }
 
 //////////////////// LOOP ////////////////////
