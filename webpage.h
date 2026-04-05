@@ -15,23 +15,78 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     box-sizing: border-box;
     -webkit-tap-highlight-color: transparent;
     user-select: none;
-    touch-action: none;
   }
 
   html, body {
     margin: 0;
     padding: 0;
     width: 100%;
-    height: 100%;
-    overflow: hidden;
+    min-height: 100%;
     background: #1a1a2e;
+    font-family: sans-serif;
   }
 
-  /* ---- SHELL ---- */
-  .shell {
+  /* Game Selection Screen */
+  .game-selector {
+    padding: 20px;
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    text-align: center;
+    color: #0ff;
+    margin-bottom: 30px;
+  }
+
+  .game-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 20px;
+    margin-bottom: 30px;
+  }
+
+  .game-card {
+    background: linear-gradient(135deg, #2a2a4a, #1a1a2e);
+    border: 2px solid #0ff;
+    border-radius: 15px;
+    padding: 30px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+
+  .game-card:hover {
+    transform: scale(1.05);
+    box-shadow: 0 0 20px rgba(0,255,255,0.3);
+  }
+
+  .game-card h2 {
+    color: #0ff;
+    margin: 0 0 10px 0;
+    font-size: 1.5em;
+  }
+
+  .game-card p {
+    color: #aaa;
+    margin: 0;
+    font-size: 0.9em;
+  }
+
+  /* Controller Screen */
+  .controller {
+    display: none;
     width: 100vw;
     height: 100vh;
     background: linear-gradient(160deg, #2a2a4a 0%, #1a1a2e 100%);
+    position: fixed;
+    top: 0;
+    left: 0;
+  }
+
+  .shell {
+    width: 100%;
+    height: 100%;
     display: flex;
     flex-direction: row;
     align-items: center;
@@ -40,7 +95,6 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     position: relative;
   }
 
-  /* ---- SCREEN WINDOW (centre) ---- */
   .screen-area {
     display: flex;
     flex-direction: column;
@@ -65,7 +119,6 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     text-transform: uppercase;
   }
 
-  /* START / SELECT row */
   .sys-row {
     display: flex;
     gap: 16px;
@@ -88,15 +141,13 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     transition: background 0.08s, transform 0.08s, box-shadow 0.08s;
   }
 
-  .btn-sys.held,
-  .btn-sys:active {
+  .btn-sys.held, .btn-sys:active {
     background: #0ff;
     color: #000;
     transform: translateY(2px);
     box-shadow: 0 1px 0 #111;
   }
 
-  /* ---- LEFT SIDE — D-PAD ---- */
   .left-side {
     display: flex;
     flex-direction: column;
@@ -107,19 +158,20 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 
   .dpad {
     display: grid;
-    grid-template-columns: 52px 52px 52px;
-    grid-template-rows:    52px 52px 52px;
-    gap: 3px;
+    grid-template-columns: 60px 60px 60px;
+    grid-template-rows: 60px 60px 60px;
+    gap: 4px;
   }
 
   .btn-dpad {
-    width: 52px;
-    height: 52px;
+    width: 60px;
+    height: 60px;
     background: #2a2a4a;
     border: none;
-    border-radius: 6px;
+    border-radius: 10px;
     color: #ccc;
-    font-size: 20px;
+    font-size: 28px;
+    font-weight: bold;
     cursor: pointer;
     box-shadow: 0 4px 0 #0a0a1a;
     transition: background 0.08s, transform 0.08s, box-shadow 0.08s;
@@ -128,8 +180,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     justify-content: center;
   }
 
-  .btn-dpad.held,
-  .btn-dpad:active {
+  .btn-dpad.held, .btn-dpad:active {
     background: #0ff;
     color: #000;
     transform: translateY(3px);
@@ -142,7 +193,6 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     box-shadow: none !important;
   }
 
-  /* ---- RIGHT SIDE — A / B ---- */
   .right-side {
     display: flex;
     flex-direction: column;
@@ -150,27 +200,19 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     justify-content: center;
   }
 
-  /*
-    GBA layout (landscape view):
-    
-         [ A ]
-    [ B ]
-    
-    Grid: 2 cols x 2 rows, A top-right, B bottom-left
-  */
   .ab-grid {
     display: grid;
-    grid-template-columns: 64px 64px;
-    grid-template-rows:    64px 64px;
-    gap: 6px;
+    grid-template-columns: 70px 70px;
+    grid-template-rows: 70px 70px;
+    gap: 8px;
   }
 
   .btn-ab {
-    width: 64px;
-    height: 64px;
+    width: 70px;
+    height: 70px;
     border-radius: 50%;
     border: none;
-    font-size: 18px;
+    font-size: 24px;
     font-weight: bold;
     font-family: sans-serif;
     cursor: pointer;
@@ -179,8 +221,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     color: #fff;
   }
 
-  .btn-ab.held,
-  .btn-ab:active {
+  .btn-ab.held, .btn-ab:active {
     transform: translateY(4px);
     box-shadow: 0 1px 0 #000;
     filter: brightness(1.3);
@@ -198,22 +239,40 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     grid-row: 2;
   }
 
-  /* labels under A/B grid */
   .ab-labels {
     display: grid;
-    grid-template-columns: 64px 64px;
-    gap: 6px;
-    margin-top: 4px;
+    grid-template-columns: 70px 70px;
+    gap: 8px;
+    margin-top: 6px;
   }
 
   .ab-label {
     text-align: center;
-    font-size: 11px;
+    font-size: 12px;
     color: #555;
     font-family: sans-serif;
+    font-weight: bold;
   }
 
-  /* status pill */
+  .btn-menu {
+    background: #900;
+    color: #fff;
+    width: 80px;
+    height: 30px;
+    border-radius: 15px;
+    border: none;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 3px 0 #300;
+    transition: background 0.08s, transform 0.08s, box-shadow 0.08s;
+  }
+
+  .btn-menu:active {
+    transform: translateY(2px);
+    box-shadow: 0 1px 0 #300;
+  }
+
   #status {
     position: fixed;
     bottom: 8px;
@@ -228,119 +287,192 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     pointer-events: none;
   }
 
+  @media(max-width: 600px) {
+    .game-grid {
+      grid-template-columns: 1fr;
+    }
+    .dpad {
+      grid-template-columns: 45px 45px 45px;
+      grid-template-rows: 45px 45px 45px;
+      gap: 3px;
+    }
+    .btn-dpad {
+      width: 45px;
+      height: 45px;
+      font-size: 22px;
+    }
+    .btn-ab {
+      width: 55px;
+      height: 55px;
+      font-size: 18px;
+    }
+    .ab-grid {
+      grid-template-columns: 55px 55px;
+      grid-template-rows: 55px 55px;
+      gap: 6px;
+    }
+    .ab-labels {
+      grid-template-columns: 55px 55px;
+    }
+    .btn-sys, .btn-menu {
+      width: 55px;
+      height: 25px;
+      font-size: 9px;
+    }
+  }
 </style>
 </head>
 <body>
-<div class="shell">
 
-  <!-- ========== LEFT: D-PAD ========== -->
-  <div class="left-side">
-    <div class="dpad">
+<!-- Game Selection Screen -->
+<div id="gameSelector" class="game-selector">
+  <h1>🎮 ESP32 GameBoy</h1>
+  <div class="game-grid" id="gameGrid">
+    <div style="text-align:center; padding:40px;">Loading games...</div>
+  </div>
+</div>
 
-      <!-- Row 1 -->
-      <div></div>
-      <button id="up" class="btn-dpad"
-        ontouchstart="press('/up',this,event)"   ontouchend="release(this,event)"
-        onmousedown="press('/up',this,event)"    onmouseup="release(this,event)">&#9650;</button>
-      <div></div>
+<!-- Controller Screen -->
+<div id="controller" class="controller">
+  <div class="shell">
+    <div class="left-side">
+      <div class="dpad">
+        <div></div>
+        <button id="up" class="btn-dpad"
+          ontouchstart="press('/up',this)" ontouchend="release(this)"
+          onmousedown="press('/up',this)" onmouseup="release(this)">▲</button>
+        <div></div>
+        <button id="left" class="btn-dpad"
+          ontouchstart="press('/left',this)" ontouchend="release(this)"
+          onmousedown="press('/left',this)" onmouseup="release(this)">◀</button>
+        <div class="btn-dpad dpad-center"></div>
+        <button id="right" class="btn-dpad"
+          ontouchstart="press('/right',this)" ontouchend="release(this)"
+          onmousedown="press('/right',this)" onmouseup="release(this)">▶</button>
+        <div></div>
+        <button id="down" class="btn-dpad"
+          ontouchstart="press('/down',this)" ontouchend="release(this)"
+          onmousedown="press('/down',this)" onmouseup="release(this)">▼</button>
+        <div></div>
+      </div>
+    </div>
 
-      <!-- Row 2 -->
-      <button id="left" class="btn-dpad"
-        ontouchstart="press('/left',this,event)"  ontouchend="release(this,event)"
-        onmousedown="press('/left',this,event)"   onmouseup="release(this,event)">&#9664;</button>
-      <div class="btn-dpad dpad-center"></div>
-      <button id="right" class="btn-dpad"
-        ontouchstart="press('/right',this,event)" ontouchend="release(this,event)"
-        onmousedown="press('/right',this,event)"  onmouseup="release(this,event)">&#9654;</button>
+    <div class="screen-area">
+      <div class="screen-bezel">
+        <div class="screen-label">GAME BOY</div>
+      </div>
+      <div class="sys-row">
+        <button id="select" class="btn-sys"
+          ontouchstart="press('/select',this)" ontouchend="release(this)"
+          onmousedown="press('/select',this)" onmouseup="release(this)">SELECT</button>
+        <button id="start" class="btn-sys"
+          ontouchstart="press('/start',this)" ontouchend="release(this)"
+          onmousedown="press('/start',this)" onmouseup="release(this)">START</button>
+        <button id="menu" class="btn-menu" onclick="exitToMenu()">MENU</button>
+      </div>
+    </div>
 
-      <!-- Row 3 -->
-      <div></div>
-      <button id="down" class="btn-dpad"
-        ontouchstart="press('/down',this,event)"  ontouchend="release(this,event)"
-        onmousedown="press('/down',this,event)"   onmouseup="release(this,event)">&#9660;</button>
-      <div></div>
-
+    <div class="right-side">
+      <div class="ab-grid">
+        <button id="a" class="btn-ab btn-a"
+          ontouchstart="press('/a',this)" ontouchend="release(this)"
+          onmousedown="press('/a',this)" onmouseup="release(this)">A</button>
+        <button id="b" class="btn-ab btn-b"
+          ontouchstart="press('/b',this)" ontouchend="release(this)"
+          onmousedown="press('/b',this)" onmouseup="release(this)">B</button>
+      </div>
+      <div class="ab-labels">
+        <div class="ab-label">B</div>
+        <div class="ab-label">A</div>
+      </div>
     </div>
   </div>
-
-  <!-- ========== CENTRE: SCREEN + START/SELECT ========== -->
-  <div class="screen-area">
-    <div class="screen-bezel">
-      <div class="screen-label">&#9632;&nbsp;&nbsp;Nintendo&nbsp;&nbsp;&#9632;</div>
-    </div>
-    <div class="sys-row">
-      <button id="select" class="btn-sys"
-        ontouchstart="press('/select',this,event)" ontouchend="release(this,event)"
-        onmousedown="press('/select',this,event)"  onmouseup="release(this,event)">SELECT</button>
-      <button id="start" class="btn-sys"
-        ontouchstart="press('/start',this,event)"  ontouchend="release(this,event)"
-        onmousedown="press('/start',this,event)"   onmouseup="release(this,event)">START</button>
-    </div>
-  </div>
-
-  <!-- ========== RIGHT: A / B ========== -->
-  <div class="right-side">
-    <!--
-      GBA button layout:
-           [ A ]
-      [ B ]
-    -->
-    <div class="ab-grid">
-      <button id="a" class="btn-ab btn-a"
-        ontouchstart="press('/a',this,event)"  ontouchend="release(this,event)"
-        onmousedown="press('/a',this,event)"   onmouseup="release(this,event)">A</button>
-      <button id="b" class="btn-ab btn-b"
-        ontouchstart="press('/b',this,event)"  ontouchend="release(this,event)"
-        onmousedown="press('/b',this,event)"   onmouseup="release(this,event)">B</button>
-    </div>
-    <div class="ab-labels">
-      <div class="ab-label">B</div>
-      <div class="ab-label">A</div>
-    </div>
-  </div>
-
-</div><!-- /shell -->
-
-<div id="status">Ready</div>
+  <div id="status">Ready</div>
+</div>
 
 <script>
-
-  // ---- Input handling ----
   let held = null;
 
-function press(cmd, el, e) {
-  if (e) e.preventDefault();   // ← stops browser firing fake mousedown after touch
-  if (held && held !== el) release(held);
-  held = el;
-  el.classList.add('held');
-  fetch(cmd).catch(() => {});
-  document.getElementById('status').textContent =
-    cmd.replace('/', '').toUpperCase();
-}
+  function press(cmd, el) {
+    if (held && held !== el) release(held);
+    held = el;
+    el.classList.add('held');
+    fetch(cmd).catch(() => {});
+    document.getElementById('status').textContent = cmd.replace('/', '').toUpperCase();
+  }
 
-function release(el, e) {
-  if (e) e.preventDefault();   // ← stops browser firing fake mouseup after touchend
-  if (!el) return;
-  el.classList.remove('held');
-  held = null;
-  fetch('/release').catch(() => {});
-  document.getElementById('status').textContent = 'Ready';
-}
-  // Prevent context menu on long-press
+  function release(el) {
+    if (!el) return;
+    el.classList.remove('held');
+    held = null;
+    fetch('/release').catch(() => {});
+    document.getElementById('status').textContent = 'Ready';
+  }
+
+  function exitToMenu() {
+    fetch('/exit').then(() => {
+      location.reload();
+    }).catch(() => {
+      location.reload();
+    });
+  }
+
+  function selectGame(gameId, gameName) {
+    const gameGrid = document.getElementById('gameGrid');
+    gameGrid.innerHTML = '<div style="text-align:center; padding:40px;">Loading ' + gameName + '...</div>';
+    
+    fetch('/selectgame?game=' + gameId)
+      .then(() => {
+        document.getElementById('gameSelector').style.display = 'none';
+        document.getElementById('controller').style.display = 'block';
+      })
+      .catch(err => {
+        console.error('Error:', err);
+        alert('Failed to load game. Please try again.');
+        location.reload();
+      });
+  }
+
+  function loadGames() {
+    fetch('/games')
+      .then(response => response.json())
+      .then(games => {
+        const gameGrid = document.getElementById('gameGrid');
+        gameGrid.innerHTML = '';
+        
+        games.forEach((game, index) => {
+          const card = document.createElement('div');
+          card.className = 'game-card';
+          card.onclick = () => selectGame(index, game.name);
+          card.innerHTML = `
+            <h2>${game.name}</h2>
+            <p>Click to play</p>
+          `;
+          gameGrid.appendChild(card);
+        });
+      })
+      .catch(err => {
+        console.error('Error loading games:', err);
+        document.getElementById('gameGrid').innerHTML = 
+          '<div style="text-align:center; padding:40px;">Error loading games. Make sure you are connected to the ESP32.</div>';
+      });
+  }
+
+  // Keyboard support
   document.addEventListener('contextmenu', e => e.preventDefault());
 
-  // ---- Keyboard (desktop testing) ----
   const keyMap = {
-    ArrowUp:    ['/up',    'up'],
-    ArrowDown:  ['/down',  'down'],
-    ArrowLeft:  ['/left',  'left'],
-    ArrowRight: ['/right', 'right'],
-    z:          ['/a',     'a'],
-    Z:          ['/a',     'a'],
-    x:          ['/b',     'b'],
-    X:          ['/b',     'b'],
-    Enter:      ['/start', 'start'],
-    Shift:      ['/select','select'],
+    ArrowUp:    '/up',
+    ArrowDown:  '/down',
+    ArrowLeft:  '/left',
+    ArrowRight: '/right',
+    z:          '/a',
+    Z:          '/a',
+    x:          '/b',
+    X:          '/b',
+    Enter:      '/start',
+    Shift:      '/select',
+    Escape:     '/exit',
   };
 
   const heldKeys = new Set();
@@ -349,25 +481,33 @@ function release(el, e) {
     if (heldKeys.has(e.key) || !keyMap[e.key]) return;
     e.preventDefault();
     heldKeys.add(e.key);
-    const [cmd, id] = keyMap[e.key];
-    const el = document.getElementById(id);
-    if (el) el.classList.add('held');
+    const cmd = keyMap[e.key];
+    const btnId = cmd.replace('/', '');
+    const el = document.getElementById(btnId);
+    if (el && cmd !== '/exit') {
+      el.classList.add('held');
+    }
     fetch(cmd).catch(() => {});
-    document.getElementById('status').textContent = cmd.replace('/','').toUpperCase();
+    if (cmd === '/exit') {
+      location.reload();
+    }
+    document.getElementById('status').textContent = cmd.replace('/', '').toUpperCase();
   });
 
   document.addEventListener('keyup', e => {
     if (!keyMap[e.key]) return;
     heldKeys.delete(e.key);
-    const [, id] = keyMap[e.key];
-    const el = document.getElementById(id);
+    const cmd = keyMap[e.key];
+    const btnId = cmd.replace('/', '');
+    const el = document.getElementById(btnId);
     if (el) el.classList.remove('held');
-    if (heldKeys.size === 0) {
+    if (heldKeys.size === 0 && cmd !== '/exit') {
       fetch('/release').catch(() => {});
       document.getElementById('status').textContent = 'Ready';
     }
   });
 
+  loadGames();
 </script>
 </body>
 </html>
