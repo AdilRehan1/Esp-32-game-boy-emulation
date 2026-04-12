@@ -585,6 +585,7 @@ void setup()
   server.on("/start", pressStart);
   server.on("/select", pressSelect);
   server.on("/release", releaseKeys);
+  server.on("/games", handleGamesList);
   server.begin();
   
   // Show game selection menu on TFT
