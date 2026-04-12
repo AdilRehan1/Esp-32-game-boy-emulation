@@ -6,7 +6,6 @@
 #include <Adafruit_ILI9341.h>
 #include "driver/i2s.h"
 
-// ADD these three lines right before the peanut_gb include block
 extern "C" uint8_t audio_read(uint16_t addr);
 extern "C" void    audio_write(uint16_t addr, uint8_t val);
 
@@ -16,16 +15,15 @@ extern "C" {
 #include "peanut_gb.h"
 }
 
-// Include ROM manager and webpage
 #include "rom_manager.h"
 #include "webpage.h"
 
-// Global variables for current game
+// Global variables
 const unsigned char* game_rom = nullptr;
 uint32_t game_rom_size = 0;
 int current_game = 0;
 bool game_selected = false;
-int selected_index = 0;
+bool return_to_menu = false;
 
 //////////////////// WIFI ////////////////////
 
@@ -392,6 +390,10 @@ void load_game(int game_index) {
     {
       Serial.print("ROM FAILED: ");
       Serial.println((int)ret);
+      tft.setTextColor(ILI9341_RED);
+      tft.setCursor(0, 0);
+      tft.print("ROM FAILED: ");
+      tft.println((int)ret);
       while(1);
     }
     
@@ -399,7 +401,7 @@ void load_game(int game_index) {
   }
 }
 
-void drawGameMenu() {
+void showGameMenu() {
   tft.fillScreen(ILI9341_BLACK);
   tft.setTextColor(ILI9341_CYAN);
   tft.setTextSize(2);
@@ -409,35 +411,36 @@ void drawGameMenu() {
   tft.setTextColor(ILI9341_WHITE);
   tft.setTextSize(1);
   tft.setCursor(30, 45);
-  tft.print("Select a game from web:");
+  tft.print("Connect to WiFi:");
+  tft.setCursor(30, 58);
+  tft.print(ssid);
+  tft.setCursor(30, 78);
+  tft.print("IP: ");
+  tft.print(WiFi.softAPIP());
   
-  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_YELLOW);
+  tft.setCursor(30, 105);
+  tft.print("Available Games:");
   
+  tft.setTextSize(1);
   for (int i = 0; i < GAME_COUNT; i++) {
     GameROM game;
     memcpy_P(&game, &GAMES[i], sizeof(GameROM));
-    
-    int y = 80 + i * 35;
-    
-    if (i == selected_index) {
-      tft.fillRect(20, y - 8, 280, 30, ILI9341_BLUE);
-      tft.setTextColor(ILI9341_YELLOW);
-    } else {
-      tft.setTextColor(ILI9341_WHITE);
-    }
-    
-    tft.setCursor(30, y);
-    tft.print(game.name);
+    int y = 130 + i * 20;
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(40, y);
+    tft.print((i + 1));
+    tft.print(". ");
+    tft.println(game.name);
   }
   
   tft.setTextColor(ILI9341_GREEN);
-  tft.setTextSize(1);
-  tft.setCursor(30, 210);
-  tft.print("Connect to WiFi: ");
-  tft.print(ssid);
-  tft.setCursor(30, 225);
-  tft.print("IP: ");
+  tft.setCursor(30, 190);
+  tft.print("Open browser and go to:");
+  tft.setCursor(30, 205);
   tft.print(WiFi.softAPIP());
+  tft.setCursor(30, 220);
+  tft.print("Click on a game to play!");
 }
 
 //////////////////// I2S INIT ////////////////////
@@ -503,9 +506,25 @@ void audioTask(void* param)
 //////////////////// WEB HANDLERS ////////////////////
 
 void handleRoot() { server.send_P(200, "text/html", WEBPAGE); }
-void handleSelectGame() { server.send(200, "text/plain", "OK"); }
-void handleController() { server.send_P(200, "text/html", WEBPAGE); }
-void handleCurrentGame() { server.send(200, "text/plain", "Game"); }
+
+void handleSelectGame() {
+  if (server.hasArg("game")) {
+    int game_id = server.arg("game").toInt();
+    if (game_id >= 0 && game_id < GAME_COUNT) {
+      game_selected = true;
+      current_game = game_id;
+      server.send(200, "text/plain", "OK");
+      return;
+    }
+  }
+  server.send(400, "text/plain", "Invalid game");
+}
+
+void handleExit() { 
+  return_to_menu = true;
+  server.send(200, "text/plain", "OK"); 
+}
+
 void pressUp()     { wifi_keys |= JOYPAD_UP;     server.send(200, "text/plain", "OK"); }
 void pressDown()   { wifi_keys |= JOYPAD_DOWN;   server.send(200, "text/plain", "OK"); }
 void pressLeft()   { wifi_keys |= JOYPAD_LEFT;   server.send(200, "text/plain", "OK"); }
@@ -543,8 +562,10 @@ void setup()
   // Setup WiFi
   WiFi.softAP(ssid, password);
   
-  // Setup web server - only essential routes
+  // Setup web server
   server.on("/", handleRoot);
+  server.on("/selectgame", handleSelectGame);
+  server.on("/exit", handleExit);
   server.on("/up", pressUp);
   server.on("/down", pressDown);
   server.on("/left", pressLeft);
@@ -556,14 +577,23 @@ void setup()
   server.on("/release", releaseKeys);
   server.begin();
   
-  // Draw menu on TFT
-  drawGameMenu();
+  // Show game selection menu on TFT
+  showGameMenu();
   
-  // Wait 5 seconds then load first game
-  delay(5000);
+  Serial.println("ESP32 GameBoy Ready");
+  Serial.print("WiFi AP: ");
+  Serial.println(ssid);
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
   
-  // Load first game
-  load_game(0);
+  // Wait for game selection from web
+  while (!game_selected) {
+    server.handleClient();
+    delay(10);
+  }
+  
+  // Load selected game
+  load_game(current_game);
   
   // Clear screen for game
   tft.fillScreen(ILI9341_BLACK);
@@ -574,7 +604,37 @@ void setup()
 void loop()
 {
   server.handleClient();
-
+  
+  // Check if user wants to exit to menu
+  if (return_to_menu) {
+    return_to_menu = false;
+    game_selected = false;
+    
+    // Reset APU
+    memset(apuReg, 0, sizeof(apuReg));
+    memset(&aCh1, 0, sizeof(aCh1));
+    memset(&aCh2, 0, sizeof(aCh2));
+    memset(&aCh3, 0, sizeof(aCh3));
+    memset(&aCh4, 0, sizeof(aCh4));
+    aCh4.lfsr = 0x7FFF;
+    apuOn = true;
+    fsCounter = 0;
+    fsStep = 0;
+    
+    // Show menu again
+    showGameMenu();
+    
+    // Wait for new game selection
+    while (!game_selected) {
+      server.handleClient();
+      delay(10);
+    }
+    
+    // Load new game
+    load_game(current_game);
+    tft.fillScreen(ILI9341_BLACK);
+  }
+  
   uint32_t frame_start = millis();
   gb.direct.joypad = ~wifi_keys;
   gb_run_frame(&gb);
