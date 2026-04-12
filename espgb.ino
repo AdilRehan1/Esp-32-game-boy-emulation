@@ -506,7 +506,17 @@ void audioTask(void* param)
 //////////////////// WEB HANDLERS ////////////////////
 
 void handleRoot() { server.send_P(200, "text/html", WEBPAGE); }
-
+void handleGamesList() {
+  String json = "[";
+  for (int i = 0; i < GAME_COUNT; i++) {
+    GameROM game;
+    memcpy_P(&game, &GAMES[i], sizeof(GameROM));
+    if (i > 0) json += ",";
+    json += "{\"name\":\"" + String(game.name) + "\",\"id\":" + String(i) + "}";
+  }
+  json += "]";
+  server.send(200, "application/json", json);
+}
 void handleSelectGame() {
   if (server.hasArg("game")) {
     int game_id = server.arg("game").toInt();
