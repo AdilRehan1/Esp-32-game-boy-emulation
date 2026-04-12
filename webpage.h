@@ -73,17 +73,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     font-size: 0.9em;
   }
 
-  .game-card.selected {
-    background: linear-gradient(135deg, #0ff, #0aa);
-    border-color: #fff;
-  }
-
-  .game-card.selected h2,
-  .game-card.selected p {
-    color: #000;
-  }
-
-  /* Controller Screen (hidden initially) */
+  /* Controller Screen */
   .controller {
     display: none;
     width: 100vw;
@@ -168,19 +158,20 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 
   .dpad {
     display: grid;
-    grid-template-columns: 52px 52px 52px;
-    grid-template-rows: 52px 52px 52px;
-    gap: 3px;
+    grid-template-columns: 60px 60px 60px;
+    grid-template-rows: 60px 60px 60px;
+    gap: 4px;
   }
 
   .btn-dpad {
-    width: 52px;
-    height: 52px;
+    width: 60px;
+    height: 60px;
     background: #2a2a4a;
     border: none;
-    border-radius: 6px;
+    border-radius: 10px;
     color: #ccc;
-    font-size: 20px;
+    font-size: 28px;
+    font-weight: bold;
     cursor: pointer;
     box-shadow: 0 4px 0 #0a0a1a;
     transition: background 0.08s, transform 0.08s, box-shadow 0.08s;
@@ -211,17 +202,17 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 
   .ab-grid {
     display: grid;
-    grid-template-columns: 64px 64px;
-    grid-template-rows: 64px 64px;
-    gap: 6px;
+    grid-template-columns: 70px 70px;
+    grid-template-rows: 70px 70px;
+    gap: 8px;
   }
 
   .btn-ab {
-    width: 64px;
-    height: 64px;
+    width: 70px;
+    height: 70px;
     border-radius: 50%;
     border: none;
-    font-size: 18px;
+    font-size: 24px;
     font-weight: bold;
     font-family: sans-serif;
     cursor: pointer;
@@ -250,16 +241,17 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 
   .ab-labels {
     display: grid;
-    grid-template-columns: 64px 64px;
-    gap: 6px;
-    margin-top: 4px;
+    grid-template-columns: 70px 70px;
+    gap: 8px;
+    margin-top: 6px;
   }
 
   .ab-label {
     text-align: center;
-    font-size: 11px;
+    font-size: 12px;
     color: #555;
     font-family: sans-serif;
+    font-weight: bold;
   }
 
   .btn-menu {
@@ -300,24 +292,27 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
       grid-template-columns: 1fr;
     }
     .dpad {
-      grid-template-columns: 40px 40px 40px;
-      grid-template-rows: 40px 40px 40px;
-      gap: 2px;
+      grid-template-columns: 45px 45px 45px;
+      grid-template-rows: 45px 45px 45px;
+      gap: 3px;
     }
     .btn-dpad {
-      width: 40px;
-      height: 40px;
-      font-size: 16px;
+      width: 45px;
+      height: 45px;
+      font-size: 22px;
     }
     .btn-ab {
-      width: 50px;
-      height: 50px;
-      font-size: 14px;
+      width: 55px;
+      height: 55px;
+      font-size: 18px;
     }
     .ab-grid {
-      grid-template-columns: 50px 50px;
-      grid-template-rows: 50px 50px;
-      gap: 4px;
+      grid-template-columns: 55px 55px;
+      grid-template-rows: 55px 55px;
+      gap: 6px;
+    }
+    .ab-labels {
+      grid-template-columns: 55px 55px;
     }
     .btn-sys, .btn-menu {
       width: 55px;
@@ -333,7 +328,6 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 <div id="gameSelector" class="game-selector">
   <h1>🎮 ESP32 GameBoy</h1>
   <div class="game-grid" id="gameGrid">
-    <!-- Games will be loaded here -->
     <div style="text-align:center; padding:40px;">Loading games...</div>
   </div>
 </div>
@@ -365,7 +359,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 
     <div class="screen-area">
       <div class="screen-bezel">
-        <div class="screen-label">■&nbsp;&nbsp;Nintendo&nbsp;&nbsp;■</div>
+        <div class="screen-label">GAME BOY</div>
       </div>
       <div class="sys-row">
         <button id="select" class="btn-sys"
@@ -424,14 +418,11 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
   }
 
   function selectGame(gameId, gameName) {
-    // Show loading indicator
     const gameGrid = document.getElementById('gameGrid');
     gameGrid.innerHTML = '<div style="text-align:center; padding:40px;">Loading ' + gameName + '...</div>';
     
-    // Send selection to ESP32
     fetch('/selectgame?game=' + gameId)
       .then(() => {
-        // Hide game selector, show controller
         document.getElementById('gameSelector').style.display = 'none';
         document.getElementById('controller').style.display = 'block';
       })
@@ -442,7 +433,6 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
       });
   }
 
-  // Load available games from ESP32
   function loadGames() {
     fetch('/games')
       .then(response => response.json())
@@ -468,7 +458,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
       });
   }
 
-  // Keyboard support for controller
+  // Keyboard support
   document.addEventListener('contextmenu', e => e.preventDefault());
 
   const keyMap = {
@@ -517,7 +507,6 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     }
   });
 
-  // Load games when page loads
   loadGames();
 </script>
 </body>
