@@ -1,11 +1,11 @@
 #pragma once
 #include <pgmspace.h>
 
-// ROM structure - remove const to allow copying
+// ROM structure
 struct GameROM {
   const char* name;
   const unsigned char* data;
-  uint32_t size;  // Remove const here
+  uint32_t size;
 };
 
 // Include your ROM files
