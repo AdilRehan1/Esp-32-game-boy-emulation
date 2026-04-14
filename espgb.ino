@@ -1,10 +1,11 @@
 #include <Arduino.h>
 #include <SPI.h>
-#include <WiFi.h>
-#include <WebServer.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include "driver/i2s.h"
+
+// Include our separated modules
+#include "sd_manager.h"
 
 extern "C" uint8_t audio_read(uint16_t addr);
 extern "C" void    audio_write(uint16_t addr, uint8_t val);
@@ -15,331 +16,84 @@ extern "C" {
 #include "peanut_gb.h"
 }
 
-#include "rom_manager.h"
-#include "webpage.h"
+// ==================== PIN DEFINITIONS ====================
 
-// Global variables
+// Display (ILI9341)
+#define TFT_CS      5
+#define TFT_DC      2
+#define TFT_RST     4
+#define TFT_MOSI    23
+#define TFT_MISO    19
+#define TFT_SCLK    18
+
+// I2S Audio (MAX98357A)
+#define I2S_BCLK    26
+#define I2S_LRC     25
+#define I2S_DOUT    22
+
+// Buttons (all use INPUT_PULLUP, connect to GND when pressed)
+#define BTN_UP      13
+#define BTN_DOWN    12
+#define BTN_LEFT    14
+#define BTN_RIGHT   27
+#define BTN_A       26
+#define BTN_B       25
+#define BTN_START   33
+#define BTN_SELECT  32
+#define BTN_MENU    15
+
+// Volume Control (Potentiometer)
+#define VOLUME_POT  34
+
+// ==================== GLOBALS ====================
+
+// Emulator
+struct gb_s gb;
 const unsigned char* game_rom = nullptr;
 uint32_t game_rom_size = 0;
+uint16_t scaledRow[320];
+
+// Game selection
 int current_game = 0;
+int menuSelection = 0;
 bool game_selected = false;
 bool return_to_menu = false;
 
-//////////////////// WIFI ////////////////////
-
-const char* ssid     = "ESP32-GameBoy";
-const char* password = "12345678";
-
-WebServer server(80);
+// Button states
 volatile uint8_t wifi_keys = 0;
+bool lastButtonStates[9] = {false};
+unsigned long lastDebounce[9] = {0};
+const unsigned long debounceDelay = 50;
 
-//////////////////// DISPLAY ////////////////////
+// Volume
+int currentVolume = 70;
+float volumeScale = 0.7;
+unsigned long lastVolumeRead = 0;
 
-#define TFT_CS  5
-#define TFT_DC  2
-#define TFT_RST 4
-Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
+// Frame timing
+#define FRAME_TIME_MS 16
 
-//////////////////// I2S / MAX98357A ////////////////////
+// ==================== AUDIO BUFFER ====================
 
-#define I2S_BCLK   26
-#define I2S_LRC    25
-#define I2S_DOUT   22
-#define I2S_PORT   I2S_NUM_0
 #define SAMPLE_RATE 22050
-
 #define AUDIO_BUF_SAMPLES 1024
-static int16_t  audioBuf[AUDIO_BUF_SAMPLES * 2];
+static int16_t audioBuf[AUDIO_BUF_SAMPLES * 2];
 static volatile int audioBufHead = 0;
 static volatile int audioBufTail = 0;
 
-//////////////////// GB APU ////////////////////
+// ==================== GB APU ====================
+// (Keep all your existing APU code here - aCh1, aCh2, aCh3, aCh4, apuReg, etc.)
+// ... (I'm not repeating it for brevity, but keep all your APU functions) ...
 
-static uint8_t apuReg[0x30];
-static const uint8_t DUTY[4] = { 1, 2, 4, 6 };
+// ==================== DISPLAY ====================
 
-struct SquareCh {
-  bool    on;
-  uint8_t dutyIdx;
-  int     vol, envVol0;
-  bool    envAdd;
-  int     envPer, envTimer;
-  int     freqReg;
-  uint32_t phase, phaseInc;
-  int     lenTimer;
-  bool    lenOn;
-};
+Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
 
-struct WaveCh {
-  bool    on, dacOn;
-  int     outLevel;
-  int     freqReg;
-  uint32_t phase, phaseInc;
-  int     lenTimer;
-  bool    lenOn;
-};
-
-struct NoiseCh {
-  bool    on;
-  int     vol, envVol0;
-  bool    envAdd;
-  int     envPer, envTimer;
-  int     clkShift, divCode;
-  bool    shortMode;
-  uint16_t lfsr;
-  uint32_t clkAcc, clkPer;
-  int     lenTimer;
-  bool    lenOn;
-};
-
-static SquareCh aCh1, aCh2;
-static WaveCh   aCh3;
-static NoiseCh  aCh4;
-static bool     apuOn = true;
-
-static int fsCounter = 0;
-static int fsStep    = 0;
-#define FS_PERIOD (SAMPLE_RATE / 512)
-
-static uint32_t sqInc(int f)
-{
-  if (f >= 2048) return 0;
-  return (uint32_t)(131072.0f / (2048 - f) * 8.0f / SAMPLE_RATE * 8192.0f);
-}
-
-static uint32_t wvInc(int f)
-{
-  if (f >= 2048) return 0;
-  return (uint32_t)(65536.0f / (2048 - f) * 32.0f / SAMPLE_RATE * 256.0f);
-}
-
-static uint32_t noiseClkPer(int shift, int div)
-{
-  float d = div == 0 ? 0.5f : (float)div;
-  float hz = 524288.0f / d / (float)(1 << (shift + 1));
-  if (hz < 1.0f) return 0xFFFFFF;
-  return (uint32_t)(SAMPLE_RATE / hz * 256.0f);
-}
-
-static void trigCh1()
-{
-  aCh1.on      = true;
-  aCh1.vol     = aCh1.envVol0;
-  aCh1.envTimer = aCh1.envPer;
-  if (!aCh1.lenTimer) aCh1.lenTimer = 64;
-  aCh1.phaseInc = sqInc(aCh1.freqReg);
-}
-
-static void trigCh2()
-{
-  aCh2.on      = true;
-  aCh2.vol     = aCh2.envVol0;
-  aCh2.envTimer = aCh2.envPer;
-  if (!aCh2.lenTimer) aCh2.lenTimer = 64;
-  aCh2.phaseInc = sqInc(aCh2.freqReg);
-}
-
-static void trigCh3()
-{
-  aCh3.on    = true;
-  aCh3.phase = 0;
-  if (!aCh3.lenTimer) aCh3.lenTimer = 256;
-  aCh3.phaseInc = wvInc(aCh3.freqReg);
-}
-
-static void trigCh4()
-{
-  aCh4.on       = true;
-  aCh4.vol      = aCh4.envVol0;
-  aCh4.envTimer  = aCh4.envPer;
-  aCh4.lfsr     = 0x7FFF;
-  if (!aCh4.lenTimer) aCh4.lenTimer = 64;
-  aCh4.clkPer   = noiseClkPer(aCh4.clkShift, aCh4.divCode);
-  aCh4.clkAcc   = 0;
-}
-
-static void tickFS()
-{
-  fsStep = (fsStep + 1) & 7;
-
-  if (!(fsStep & 1))
-  {
-    if (aCh1.lenOn && aCh1.lenTimer > 0 && --aCh1.lenTimer == 0) aCh1.on = false;
-    if (aCh2.lenOn && aCh2.lenTimer > 0 && --aCh2.lenTimer == 0) aCh2.on = false;
-    if (aCh3.lenOn && aCh3.lenTimer > 0 && --aCh3.lenTimer == 0) aCh3.on = false;
-    if (aCh4.lenOn && aCh4.lenTimer > 0 && --aCh4.lenTimer == 0) aCh4.on = false;
-  }
-
-  if (fsStep == 7)
-  {
-    auto tickEnv = [](int& vol, int envVol0, bool envAdd, int envPer, int& envTimer, bool on)
-    {
-      if (!on || envPer == 0) return;
-      if (--envTimer <= 0)
-      {
-        envTimer = envPer;
-        if (envAdd && vol < 15) vol++;
-        else if (!envAdd && vol > 0) vol--;
-      }
-    };
-    tickEnv(aCh1.vol, aCh1.envVol0, aCh1.envAdd, aCh1.envPer, aCh1.envTimer, aCh1.on);
-    tickEnv(aCh2.vol, aCh2.envVol0, aCh2.envAdd, aCh2.envPer, aCh2.envTimer, aCh2.on);
-    tickEnv(aCh4.vol, aCh4.envVol0, aCh4.envAdd, aCh4.envPer, aCh4.envTimer, aCh4.on);
-  }
-}
-
-static void apuNextSample(int16_t* L, int16_t* R)
-{
-  if (!apuOn) { *L = *R = 0; return; }
-
-  if (++fsCounter >= FS_PERIOD) { fsCounter = 0; tickFS(); }
-
-  uint8_t nr51 = apuReg[0x25];
-  int ml = 0, mr = 0;
-
-  if (aCh1.on)
-  {
-    aCh1.phase += aCh1.phaseInc;
-    int s = ((aCh1.phase >> 13) & 7) < DUTY[aCh1.dutyIdx] ? aCh1.vol : 0;
-    if (nr51 & 0x10) ml += s;
-    if (nr51 & 0x01) mr += s;
-  }
-
-  if (aCh2.on)
-  {
-    aCh2.phase += aCh2.phaseInc;
-    int s = ((aCh2.phase >> 13) & 7) < DUTY[aCh2.dutyIdx] ? aCh2.vol : 0;
-    if (nr51 & 0x20) ml += s;
-    if (nr51 & 0x02) mr += s;
-  }
-
-  if (aCh3.on && aCh3.dacOn)
-  {
-    aCh3.phase += aCh3.phaseInc;
-    int pos  = (aCh3.phase >> 8) & 31;
-    uint8_t wb = apuReg[0x20 + (pos >> 1)];
-    int nib  = (pos & 1) ? (wb & 0x0F) : (wb >> 4);
-    int s = 0;
-    switch (aCh3.outLevel)
-    {
-      case 1: s = nib;     break;
-      case 2: s = nib >> 1; break;
-      case 3: s = nib >> 2; break;
-    }
-    if (nr51 & 0x40) ml += s;
-    if (nr51 & 0x04) mr += s;
-  }
-
-  if (aCh4.on)
-  {
-    aCh4.clkAcc += 256;
-    while (aCh4.clkAcc >= aCh4.clkPer)
-    {
-      aCh4.clkAcc -= aCh4.clkPer;
-      uint16_t x = (aCh4.lfsr ^ (aCh4.lfsr >> 1)) & 1;
-      aCh4.lfsr = (aCh4.lfsr >> 1) | (x << 14);
-      if (aCh4.shortMode) aCh4.lfsr = (aCh4.lfsr & ~0x40) | (x << 6);
-    }
-    int s = (~aCh4.lfsr & 1) ? aCh4.vol : 0;
-    if (nr51 & 0x80) ml += s;
-    if (nr51 & 0x08) mr += s;
-  }
-
-  uint8_t nr50 = apuReg[0x24];
-  int vl = ((nr50 >> 4) & 7) + 1;
-  int vr = (nr50 & 7) + 1;
-
-  *L = (int16_t)((ml * vl * 32767) / (60 * 8));
-  *R = (int16_t)((mr * vr * 32767) / (60 * 8));
-}
-
-extern "C" uint8_t audio_read(uint16_t addr)
-{
-  if (addr < 0xFF10 || addr > 0xFF3F) return 0xFF;
-  return apuReg[addr - 0xFF10];
-}
-
-extern "C" void audio_write(uint16_t addr, uint8_t val)
-{
-  if (addr < 0xFF10 || addr > 0xFF3F) return;
-  apuReg[addr - 0xFF10] = val;
-
-  switch (addr)
-  {
-    case 0xFF11: aCh1.dutyIdx = (val>>6)&3; aCh1.lenTimer = 64-(val&63); break;
-    case 0xFF12:
-      aCh1.envVol0 = (val>>4)&15; aCh1.envAdd = (val>>3)&1;
-      aCh1.envPer  = val&7;
-      if (!(val & 0xF8)) aCh1.on = false;
-      break;
-    case 0xFF13: aCh1.freqReg = (aCh1.freqReg & 0x700) | val; break;
-    case 0xFF14:
-      aCh1.freqReg = (aCh1.freqReg & 0xFF) | ((val&7)<<8);
-      aCh1.lenOn   = (val>>6)&1;
-      if (val & 0x80) trigCh1();
-      break;
-    case 0xFF16: aCh2.dutyIdx = (val>>6)&3; aCh2.lenTimer = 64-(val&63); break;
-    case 0xFF17:
-      aCh2.envVol0 = (val>>4)&15; aCh2.envAdd = (val>>3)&1;
-      aCh2.envPer  = val&7;
-      if (!(val & 0xF8)) aCh2.on = false;
-      break;
-    case 0xFF18: aCh2.freqReg = (aCh2.freqReg & 0x700) | val; break;
-    case 0xFF19:
-      aCh2.freqReg = (aCh2.freqReg & 0xFF) | ((val&7)<<8);
-      aCh2.lenOn   = (val>>6)&1;
-      if (val & 0x80) trigCh2();
-      break;
-    case 0xFF1A: aCh3.dacOn = (val>>7)&1; if (!aCh3.dacOn) aCh3.on = false; break;
-    case 0xFF1B: aCh3.lenTimer = 256 - val; break;
-    case 0xFF1C: aCh3.outLevel = (val>>5)&3; break;
-    case 0xFF1D: aCh3.freqReg = (aCh3.freqReg & 0x700) | val; break;
-    case 0xFF1E:
-      aCh3.freqReg = (aCh3.freqReg & 0xFF) | ((val&7)<<8);
-      aCh3.lenOn   = (val>>6)&1;
-      if (val & 0x80) trigCh3();
-      break;
-    case 0xFF20: aCh4.lenTimer = 64-(val&63); break;
-    case 0xFF21:
-      aCh4.envVol0 = (val>>4)&15; aCh4.envAdd = (val>>3)&1;
-      aCh4.envPer  = val&7;
-      if (!(val & 0xF8)) aCh4.on = false;
-      break;
-    case 0xFF22:
-      aCh4.clkShift  = (val>>4)&15;
-      aCh4.shortMode = (val>>3)&1;
-      aCh4.divCode   = val&7;
-      break;
-    case 0xFF23:
-      aCh4.lenOn = (val>>6)&1;
-      if (val & 0x80) trigCh4();
-      break;
-    case 0xFF26:
-      apuOn = (val>>7)&1;
-      if (!apuOn)
-      {
-        memset(apuReg, 0, 0x20);
-        aCh1.on = aCh2.on = aCh3.on = aCh4.on = false;
-      }
-      break;
-  }
-}
-
-//////////////////// EMULATOR ////////////////////
-
-struct gb_s gb;
-uint16_t scaledRow[320];
-
-#define FRAME_TIME_MS 16
-
-void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
-{
-  for (int x = 0; x < LCD_WIDTH; x++)
-  {
+void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line) {
+  for (int x = 0; x < LCD_WIDTH; x++) {
     uint8_t p = pixels[x] & 3;
     uint16_t c;
-    switch (p)
-    {
+    switch (p) {
       case 0: c = 0xFFFF; break;
       case 1: c = 0xAD55; break;
       case 2: c = 0x52AA; break;
@@ -353,10 +107,9 @@ void lcd_draw(struct gb_s* gb, const uint8_t* pixels, const uint_fast8_t line)
     tft.drawRGBBitmap(0, sy, scaledRow, 320, 1);
 }
 
-//////////////////// ROM ACCESS ////////////////////
+// ==================== ROM ACCESS ====================
 
-uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr) 
-{ 
+uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr) {
   if (addr < game_rom_size) {
     return game_rom[addr];
   }
@@ -364,44 +117,15 @@ uint8_t rom_read(struct gb_s* gb, const uint_fast32_t addr)
 }
 
 uint8_t cart_ram_read(struct gb_s* gb, const uint_fast32_t addr) { return 0; }
-void    cart_ram_write(struct gb_s* gb, const uint_fast32_t addr, const uint8_t val) {}
+void cart_ram_write(struct gb_s* gb, const uint_fast32_t addr, const uint8_t val) {}
 
-void gb_error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr)
-{
+void gb_error(struct gb_s* gb, const enum gb_error_e err, const uint16_t addr) {
   Serial.print("GB ERROR: "); Serial.println(err);
 }
 
-//////////////////// GAME SELECTION ////////////////////
+// ==================== GAME MENU ====================
 
-void load_game(int game_index) {
-  if (game_index >= 0 && game_index < GAME_COUNT) {
-    GameROM game;
-    memcpy_P(&game, &GAMES[game_index], sizeof(GameROM));
-    
-    game_rom = game.data;
-    game_rom_size = game.size;
-    current_game = game_index;
-    
-    Serial.print("Loading: ");
-    Serial.println(game.name);
-    
-    enum gb_init_error_e ret = gb_init(&gb, rom_read, cart_ram_read, cart_ram_write, gb_error, NULL);
-    if (ret != GB_INIT_NO_ERROR)
-    {
-      Serial.print("ROM FAILED: ");
-      Serial.println((int)ret);
-      tft.setTextColor(ILI9341_RED);
-      tft.setCursor(0, 0);
-      tft.print("ROM FAILED: ");
-      tft.println((int)ret);
-      while(1);
-    }
-    
-    gb_init_lcd(&gb, lcd_draw);
-  }
-}
-
-void showGameMenu() {
+void drawGameMenu() {
   tft.fillScreen(ILI9341_BLACK);
   tft.setTextColor(ILI9341_CYAN);
   tft.setTextSize(2);
@@ -411,144 +135,302 @@ void showGameMenu() {
   tft.setTextColor(ILI9341_WHITE);
   tft.setTextSize(1);
   tft.setCursor(30, 45);
-  tft.print("Connect to WiFi:");
-  tft.setCursor(30, 58);
-  tft.print(ssid);
-  tft.setCursor(30, 78);
-  tft.print("IP: ");
-  tft.print(WiFi.softAPIP());
+  tft.print("SELECT GAME:");
   
-  tft.setTextColor(ILI9341_YELLOW);
-  tft.setCursor(30, 105);
-  tft.print("Available Games:");
+  tft.setTextSize(2);
   
-  tft.setTextSize(1);
-  for (int i = 0; i < GAME_COUNT; i++) {
-    GameROM game;
-    memcpy_P(&game, &GAMES[i], sizeof(GameROM));
-    int y = 130 + i * 20;
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setCursor(40, y);
-    tft.print((i + 1));
+  int totalGames = getGameCount();
+  
+  if (totalGames == 0) {
+    tft.setTextColor(ILI9341_RED);
+    tft.setCursor(30, 100);
+    tft.print("NO GAMES FOUND!");
+    tft.setTextSize(1);
+    tft.setCursor(30, 140);
+    tft.print("Place .gb files in /games");
+    tft.setCursor(30, 160);
+    tft.print("folder on SD card");
+    return;
+  }
+  
+  // Show up to 5 games on screen
+  int startIndex = 0;
+  if (menuSelection >= 5) {
+    startIndex = menuSelection - 4;
+  }
+  
+  for (int i = startIndex; i < totalGames && i < startIndex + 5; i++) {
+    int y = 80 + (i - startIndex) * 40;
+    
+    if (i == menuSelection) {
+      tft.fillRect(20, y - 12, 280, 35, ILI9341_BLUE);
+      tft.setTextColor(ILI9341_YELLOW);
+    } else {
+      tft.setTextColor(ILI9341_WHITE);
+    }
+    
+    tft.setCursor(30, y);
+    tft.print(i + 1);
     tft.print(". ");
-    tft.println(game.name);
+    tft.print(getGameName(i));
   }
   
   tft.setTextColor(ILI9341_GREEN);
-  tft.setCursor(30, 190);
-  tft.print("Open browser and go to:");
-  tft.setCursor(30, 205);
-  tft.print(WiFi.softAPIP());
-  tft.setCursor(30, 220);
-  tft.print("Click on a game to play!");
+  tft.setTextSize(1);
+  tft.setCursor(30, 210);
+  tft.print("UP/DOWN: Select  START: Play");
+  tft.setCursor(30, 225);
+  tft.print("MENU: Exit game (in-game)");
+  
+  // Show volume
+  tft.setCursor(250, 225);
+  tft.print("Vol:");
+  tft.print(currentVolume);
+  tft.print("%");
 }
 
-//////////////////// I2S INIT ////////////////////
+void load_game(int game_index) {
+  if (!isSDCardAvailable() || game_index >= getGameCount()) return;
+  
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setCursor(0, 0);
+  tft.print("Loading: ");
+  tft.println(getGameName(game_index));
+  
+  // Load ROM from SD card
+  uint8_t* rom = loadROMFromSD(getGameFilename(game_index), &game_rom_size);
+  if (rom == nullptr) {
+    tft.setTextColor(ILI9341_RED);
+    tft.print("FAILED TO LOAD ROM!");
+    delay(2000);
+    drawGameMenu();
+    return;
+  }
+  
+  game_rom = rom;
+  current_game = game_index;
+  
+  Serial.print("Loading: ");
+  Serial.println(getGameName(game_index));
+  
+  enum gb_init_error_e ret = gb_init(&gb, rom_read, cart_ram_read, cart_ram_write, gb_error, NULL);
+  if (ret != GB_INIT_NO_ERROR) {
+    Serial.print("ROM FAILED: ");
+    Serial.println((int)ret);
+    tft.setTextColor(ILI9341_RED);
+    tft.print("ROM INIT FAILED: ");
+    tft.println((int)ret);
+    delay(2000);
+    drawGameMenu();
+    return;
+  }
+  
+  gb_init_lcd(&gb, lcd_draw);
+  game_selected = true;
+  
+  // Clear screen for game
+  tft.fillScreen(ILI9341_BLACK);
+}
 
-void initI2S()
-{
+// ==================== VOLUME CONTROL ====================
+
+void updateVolume() {
+  int potValue = analogRead(VOLUME_POT);
+  static int lastVolume = -1;
+  
+  int newVolume = map(potValue, 0, 4095, 0, 100);
+  newVolume = constrain(newVolume, 0, 100);
+  
+  if (abs(newVolume - lastVolume) > 2) {
+    currentVolume = newVolume;
+    volumeScale = currentVolume / 100.0;
+    lastVolume = currentVolume;
+    
+    // Show volume on TFT if in menu
+    if (!game_selected) {
+      tft.fillRect(250, 215, 70, 20, ILI9341_BLACK);
+      tft.setTextColor(ILI9341_GREEN);
+      tft.setCursor(250, 225);
+      tft.print("Vol:");
+      tft.print(currentVolume);
+      tft.print("%");
+    }
+  }
+}
+
+// ==================== BUTTON HANDLING ====================
+
+void initButtons() {
+  pinMode(BTN_UP, INPUT_PULLUP);
+  pinMode(BTN_DOWN, INPUT_PULLUP);
+  pinMode(BTN_LEFT, INPUT_PULLUP);
+  pinMode(BTN_RIGHT, INPUT_PULLUP);
+  pinMode(BTN_A, INPUT_PULLUP);
+  pinMode(BTN_B, INPUT_PULLUP);
+  pinMode(BTN_START, INPUT_PULLUP);
+  pinMode(BTN_SELECT, INPUT_PULLUP);
+  pinMode(BTN_MENU, INPUT_PULLUP);
+}
+
+void checkButtons() {
+  bool currentState;
+  unsigned long now = millis();
+  
+  struct ButtonMap {
+    int pin;
+    uint8_t joypadBit;
+    int index;
+  };
+  
+  ButtonMap buttons[] = {
+    {BTN_UP,     JOYPAD_UP,     0},
+    {BTN_DOWN,   JOYPAD_DOWN,   1},
+    {BTN_LEFT,   JOYPAD_LEFT,   2},
+    {BTN_RIGHT,  JOYPAD_RIGHT,  3},
+    {BTN_A,      JOYPAD_A,      4},
+    {BTN_B,      JOYPAD_B,      5},
+    {BTN_START,  JOYPAD_START,  6},
+    {BTN_SELECT, JOYPAD_SELECT, 7},
+  };
+  
+  // Game buttons
+  for (int i = 0; i < 8; i++) {
+    currentState = digitalRead(buttons[i].pin) == LOW;
+    
+    if (currentState != lastButtonStates[i]) {
+      lastDebounce[i] = now;
+    }
+    
+    if ((now - lastDebounce[i]) > debounceDelay) {
+      if (currentState && !lastButtonStates[i]) {
+        wifi_keys |= buttons[i].joypadBit;
+        lastButtonStates[i] = true;
+      } else if (!currentState && lastButtonStates[i]) {
+        wifi_keys &= ~buttons[i].joypadBit;
+        lastButtonStates[i] = false;
+      }
+    }
+  }
+  
+  // MENU button
+  static bool lastMenuState = false;
+  static unsigned long lastMenuDebounce = 0;
+  bool menuState = digitalRead(BTN_MENU) == LOW;
+  
+  if (menuState != lastMenuState) {
+    lastMenuDebounce = now;
+  }
+  
+  if ((now - lastMenuDebounce) > debounceDelay) {
+    if (menuState && !lastMenuState) {
+      if (game_selected) {
+        return_to_menu = true;
+      }
+      lastMenuState = true;
+    } else if (!menuState && lastMenuState) {
+      lastMenuState = false;
+    }
+  }
+  
+  // Menu navigation (only in menu)
+  if (!game_selected) {
+    static bool upPressed = false, downPressed = false;
+    static unsigned long lastNavTime = 0;
+    
+    bool upCurrent = digitalRead(BTN_UP) == LOW;
+    bool downCurrent = digitalRead(BTN_DOWN) == LOW;
+    
+    if (upCurrent && !upPressed && (now - lastNavTime) > 200) {
+      menuSelection--;
+      if (menuSelection < 0) menuSelection = getGameCount() - 1;
+      drawGameMenu();
+      upPressed = true;
+      lastNavTime = now;
+    } else if (!upCurrent && upPressed) {
+      upPressed = false;
+    }
+    
+    if (downCurrent && !downPressed && (now - lastNavTime) > 200) {
+      menuSelection++;
+      if (menuSelection >= getGameCount()) menuSelection = 0;
+      drawGameMenu();
+      downPressed = true;
+      lastNavTime = now;
+    } else if (!downCurrent && downPressed) {
+      downPressed = false;
+    }
+    
+    // START button to select game
+    static bool startPressed = false;
+    bool startCurrent = digitalRead(BTN_START) == LOW;
+    
+    if (startCurrent && !startPressed && (now - lastNavTime) > 200) {
+      load_game(menuSelection);
+      startPressed = true;
+    } else if (!startCurrent && startPressed) {
+      startPressed = false;
+    }
+  }
+}
+
+// ==================== I2S AUDIO ====================
+
+void initI2S() {
   i2s_config_t cfg = {
-    .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-    .sample_rate          = SAMPLE_RATE,
-    .bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-    .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count        = 8,
-    .dma_buf_len          = 64,
-    .use_apll             = false,
-    .tx_desc_auto_clear   = true,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 64,
+    .use_apll = false,
+    .tx_desc_auto_clear = true,
   };
+  
   i2s_pin_config_t pins = {
-    .bck_io_num   = I2S_BCLK,
-    .ws_io_num    = I2S_LRC,
+    .bck_io_num = I2S_BCLK,
+    .ws_io_num = I2S_LRC,
     .data_out_num = I2S_DOUT,
-    .data_in_num  = I2S_PIN_NO_CHANGE,
+    .data_in_num = I2S_PIN_NO_CHANGE,
   };
-  i2s_driver_install(I2S_PORT, &cfg, 0, NULL);
-  i2s_set_pin(I2S_PORT, &pins);
-  i2s_zero_dma_buffer(I2S_PORT);
+  
+  i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL);
+  i2s_set_pin(I2S_NUM_0, &pins);
+  i2s_zero_dma_buffer(I2S_NUM_0);
 }
 
-//////////////////// AUDIO TASK ////////////////////
-
-void audioTask(void* param)
-{
+void audioTask(void* param) {
   const int CHUNK = 32;
   int16_t out[CHUNK * 2];
-
-  for (;;)
-  {
+  
+  for (;;) {
     int count = 0;
-    while (audioBufTail != audioBufHead && count < CHUNK)
-    {
-      out[count*2]   = audioBuf[audioBufTail*2];
+    while (audioBufTail != audioBufHead && count < CHUNK) {
+      out[count*2] = audioBuf[audioBufTail*2];
       out[count*2+1] = audioBuf[audioBufTail*2+1];
       audioBufTail = (audioBufTail + 1) % AUDIO_BUF_SAMPLES;
       count++;
     }
-
-    if (count < CHUNK)
-    {
-      while (count < CHUNK)
-      {
+    
+    if (count < CHUNK) {
+      while (count < CHUNK) {
         apuNextSample(&out[count*2], &out[count*2+1]);
         count++;
       }
     }
-
+    
     size_t written = 0;
-    i2s_write(I2S_PORT, out, CHUNK * 2 * sizeof(int16_t), &written, portMAX_DELAY);
+    i2s_write(I2S_NUM_0, out, CHUNK * 2 * sizeof(int16_t), &written, portMAX_DELAY);
     vTaskDelay(1 / portTICK_PERIOD_MS);
   }
 }
 
-//////////////////// WEB HANDLERS ////////////////////
+// ==================== SETUP ====================
 
-void handleRoot() { server.send_P(200, "text/html", WEBPAGE); }
-void handleGamesList() {
-  String json = "[";
-  for (int i = 0; i < GAME_COUNT; i++) {
-    GameROM game;
-    memcpy_P(&game, &GAMES[i], sizeof(GameROM));
-    if (i > 0) json += ",";
-    json += "{\"name\":\"" + String(game.name) + "\",\"id\":" + String(i) + "}";
-  }
-  json += "]";
-  server.send(200, "application/json", json);
-}
-void handleSelectGame() {
-  if (server.hasArg("game")) {
-    int game_id = server.arg("game").toInt();
-    if (game_id >= 0 && game_id < GAME_COUNT) {
-      game_selected = true;
-      current_game = game_id;
-      server.send(200, "text/plain", "OK");
-      return;
-    }
-  }
-  server.send(400, "text/plain", "Invalid game");
-}
-
-void handleExit() { 
-  return_to_menu = true;
-  server.send(200, "text/plain", "OK"); 
-}
-
-void pressUp()     { wifi_keys |= JOYPAD_UP;     server.send(200, "text/plain", "OK"); }
-void pressDown()   { wifi_keys |= JOYPAD_DOWN;   server.send(200, "text/plain", "OK"); }
-void pressLeft()   { wifi_keys |= JOYPAD_LEFT;   server.send(200, "text/plain", "OK"); }
-void pressRight()  { wifi_keys |= JOYPAD_RIGHT;  server.send(200, "text/plain", "OK"); }
-void pressA()      { wifi_keys |= JOYPAD_A;      server.send(200, "text/plain", "OK"); }
-void pressB()      { wifi_keys |= JOYPAD_B;      server.send(200, "text/plain", "OK"); }
-void pressStart()  { wifi_keys |= JOYPAD_START;  server.send(200, "text/plain", "OK"); }
-void pressSelect() { wifi_keys |= JOYPAD_SELECT; server.send(200, "text/plain", "OK"); }
-void releaseKeys() { wifi_keys = 0;              server.send(200, "text/plain", "OK"); }
-
-//////////////////// SETUP ////////////////////
-
-void setup()
-{
+void setup() {
   Serial.begin(115200);
   
   // Initialize APU
@@ -558,10 +440,21 @@ void setup()
   memset(&aCh3, 0, sizeof(aCh3));
   memset(&aCh4, 0, sizeof(aCh4));
   aCh4.lfsr = 0x7FFF;
-
+  
   // Initialize display
   tft.begin();
   tft.setRotation(1);
+  tft.fillScreen(ILI9341_BLACK);
+  
+  // Initialize buttons
+  initButtons();
+  
+  // Initialize volume potentiometer
+  pinMode(VOLUME_POT, INPUT);
+  analogReadResolution(12);
+  
+  // Initialize SD card (this will scan for ROMs automatically)
+  initSDCard();
   
   // Initialize I2S
   initI2S();
@@ -569,54 +462,27 @@ void setup()
   // Start audio task
   xTaskCreatePinnedToCore(audioTask, "audio", 4096, NULL, 1, NULL, 0);
   
-  // Setup WiFi
-  WiFi.softAP(ssid, password);
+  // Show game menu
+  drawGameMenu();
   
-  // Setup web server
-  server.on("/", handleRoot);
-  server.on("/selectgame", handleSelectGame);
-  server.on("/exit", handleExit);
-  server.on("/up", pressUp);
-  server.on("/down", pressDown);
-  server.on("/left", pressLeft);
-  server.on("/right", pressRight);
-  server.on("/a", pressA);
-  server.on("/b", pressB);
-  server.on("/start", pressStart);
-  server.on("/select", pressSelect);
-  server.on("/release", releaseKeys);
-  server.on("/games", handleGamesList);
-  server.begin();
-  
-  // Show game selection menu on TFT
-  showGameMenu();
-  
-  Serial.println("ESP32 GameBoy Ready");
-  Serial.print("WiFi AP: ");
-  Serial.println(ssid);
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.softAPIP());
-  
-  // Wait for game selection from web
-  while (!game_selected) {
-    server.handleClient();
-    delay(10);
-  }
-  
-  // Load selected game
-  load_game(current_game);
-  
-  // Clear screen for game
-  tft.fillScreen(ILI9341_BLACK);
+  Serial.println("ESP32 GameBoy Ready!");
+  Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
 }
 
-//////////////////// LOOP ////////////////////
+// ==================== LOOP ====================
 
-void loop()
-{
-  server.handleClient();
+void loop() {
+  // Update volume from potentiometer
+  static unsigned long lastVolumeCheck = 0;
+  if (millis() - lastVolumeCheck > 50) {
+    updateVolume();
+    lastVolumeCheck = millis();
+  }
   
-  // Check if user wants to exit to menu
+  // Check buttons
+  checkButtons();
+  
+  // Handle menu exit
   if (return_to_menu) {
     return_to_menu = false;
     game_selected = false;
@@ -632,24 +498,22 @@ void loop()
     fsCounter = 0;
     fsStep = 0;
     
-    // Show menu again
-    showGameMenu();
-    
-    // Wait for new game selection
-    while (!game_selected) {
-      server.handleClient();
-      delay(10);
-    }
-    
-    // Load new game
-    load_game(current_game);
-    tft.fillScreen(ILI9341_BLACK);
+    menuSelection = current_game;
+    drawGameMenu();
+    return;
   }
   
+  // Wait for game selection
+  if (!game_selected) {
+    delay(10);
+    return;
+  }
+  
+  // Run emulator
   uint32_t frame_start = millis();
   gb.direct.joypad = ~wifi_keys;
   gb_run_frame(&gb);
-
+  
   uint32_t elapsed = millis() - frame_start;
   if (elapsed < FRAME_TIME_MS)
     delay(FRAME_TIME_MS - elapsed);
